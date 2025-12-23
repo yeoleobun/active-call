@@ -92,6 +92,7 @@ pub struct ActiveCall {
     pub tts_handle: Mutex<Option<SynthesisHandle>>,
     pub auto_hangup: Arc<Mutex<Option<(u32, CallRecordHangupReason)>>>,
     pub wait_input_timeout: Arc<Mutex<Option<u32>>>,
+    pub moh: Arc<Mutex<Option<String>>>,
     pub event_sender: EventSender,
     pub app_state: AppState,
     pub invitation: Invitation,
@@ -172,6 +173,7 @@ impl ActiveCall {
             track_config,
             auto_hangup: Arc::new(Mutex::new(None)),
             wait_input_timeout: Arc::new(Mutex::new(None)),
+            moh: Arc::new(Mutex::new(None)),
             event_sender,
             tts_handle: Mutex::new(None),
             app_state,
@@ -281,6 +283,7 @@ impl ActiveCall {
             }
         };
         let server_side_track_id = &self.server_side_track_id;
+        let moh = self.moh.clone();
         let event_hook_loop = async move {
             while let Ok(event) = event_receiver.recv().await {
                 match event {
@@ -295,6 +298,22 @@ impl ActiveCall {
                         if &track_id != server_side_track_id {
                             continue;
                         }
+
+                        let moh_path = moh.lock().await.clone();
+                        if let Some(path) = moh_path {
+                            info!(session_id = self.session_id, ssrc, "looping moh: {}", path);
+                            let ssrc = rand::random::<u32>();
+                            let file_track = FileTrack::new(self.server_side_track_id.clone())
+                                .with_play_id(Some(path.clone()))
+                                .with_ssrc(ssrc)
+                                .with_path(path.clone())
+                                .with_cancel_token(self.cancel_token.child_token());
+                            self.media_stream
+                                .update_track(Box::new(file_track), Some(path))
+                                .await;
+                            continue;
+                        }
+
                         let mut auto_hangup_ref = auto_hangup.lock().await;
                         if let Some(ref auto_hangup_ssrc) = *auto_hangup_ref {
                             if auto_hangup_ssrc.0 == ssrc {
@@ -320,6 +339,29 @@ impl ActiveCall {
                                 (0, 0)
                             };
                             *input_timeout_expire_ref.lock().await = expire;
+                        }
+                    }
+                    SessionEvent::Error { track_id, .. } => {
+                        if &track_id != server_side_track_id {
+                            continue;
+                        }
+
+                        let moh_path = moh.lock().await.clone();
+                        if let Some(path) = moh_path {
+                            info!(
+                                session_id = self.session_id,
+                                "looping moh on error: {}", path
+                            );
+                            let ssrc = rand::random::<u32>();
+                            let file_track = FileTrack::new(self.server_side_track_id.clone())
+                                .with_play_id(Some(path.clone()))
+                                .with_ssrc(ssrc)
+                                .with_path(path.clone())
+                                .with_cancel_token(self.cancel_token.child_token());
+                            self.media_stream
+                                .update_track(Box::new(file_track), Some(path))
+                                .await;
+                            continue;
                         }
                     }
                     _ => {}
@@ -757,6 +799,7 @@ impl ActiveCall {
 
     async fn do_interrupt(&self, graceful: bool) -> Result<()> {
         self.tts_handle.lock().await.take();
+        *self.moh.lock().await = None;
         self.media_stream
             .remove_track(&self.server_side_track_id, graceful)
             .await;
@@ -909,6 +952,8 @@ impl ActiveCall {
             ),
         )
         .await;
+
+        *self.moh.lock().await = None;
 
         let result = match r {
             Ok(res) => res,
@@ -1404,6 +1449,7 @@ impl ActiveCall {
         let mut rtp_track_to_setup = Some(Box::new(rtp_track) as Box<dyn Track>);
 
         if let Some(moh) = moh {
+            *self.moh.lock().await = Some(moh.clone());
             let ssrc = rand::random::<u32>();
             let file_track = FileTrack::new(self.server_side_track_id.clone())
                 .with_play_id(Some(moh.clone()))
@@ -1456,13 +1502,12 @@ impl ActiveCall {
             .invite(invite_option, dlg_state_sender)
             .await?;
 
+        *self.moh.lock().await = None;
+
         if let Some(track) = rtp_track_to_setup {
             self.setup_track_with_stream(&call_option, track)
                 .await
                 .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
-            if auto_hangup {
-                *self.auto_hangup.lock().await = Some((ssrc, CallRecordHangupReason::ByRefer));
-            }
         }
 
         let answer = match answer {
@@ -1487,6 +1532,10 @@ impl ActiveCall {
             .update_remote_description(&track_id, &answer)
             .await
             .ok();
+
+        if auto_hangup {
+            *self.auto_hangup.lock().await = Some((ssrc, CallRecordHangupReason::ByRefer));
+        }
         Ok(answer)
     }
 
