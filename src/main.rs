@@ -7,8 +7,12 @@ use reqwest::StatusCode;
 use std::sync::Arc;
 use tokio::signal;
 use tower_http::services::ServeDir;
-use tracing::{Level, info, warn};
-use tracing_subscriber::FmtSubscriber;
+use tracing::level_filters::LevelFilter;
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::time::LocalTime;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use voice_engine::media::engine::StreamEngine;
 
 use active_call::app::AppStateBuilder;
@@ -23,10 +27,13 @@ pub async fn index() -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     dotenv().ok();
 
     let cli = Cli::parse();
-
     let (mut config, config_path) = if let Some(path) = cli.conf {
         let config = Config::load(&path).unwrap_or_else(|e| {
             warn!("Failed to load config from {}: {}, using defaults", path, e);
@@ -52,11 +59,49 @@ async fn main() -> Result<()> {
         }
     }
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
+    let mut env_filter = EnvFilter::from_default_env();
+    if let Some(Ok(level)) = config
+        .log_level
+        .as_ref()
+        .map(|level| level.parse::<LevelFilter>())
+    {
+        env_filter = env_filter.add_directive(level.into());
+    }
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    let mut file_layer = None;
+    let mut guard_holder = None;
+    let mut fmt_layer = None;
+    if let Some(ref log_file) = config.log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+            .expect("Failed to open log file");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file);
+        guard_holder = Some(guard);
+        file_layer = Some(
+            tracing_subscriber::fmt::layer()
+                .with_timer(LocalTime::rfc_3339())
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        );
+    } else {
+        fmt_layer = Some(tracing_subscriber::fmt::layer().with_timer(LocalTime::rfc_3339()));
+    }
+
+    if let Some(file_layer) = file_layer {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .try_init()?;
+    } else if let Some(fmt_layer) = fmt_layer {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .try_init()?;
+    }
+
+    let _ = guard_holder; // keep the guard alive
 
     info!("Starting active-call service...");
 

@@ -851,6 +851,10 @@ impl ActiveCall {
                         ));
                     });
                 });
+                headers.push(rsip::Header::Other(
+                    "X-Referred-Id".to_string(),
+                    cs.session_id.clone(),
+                ));
             })
             .ok();
 
