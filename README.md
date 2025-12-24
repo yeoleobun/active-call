@@ -24,6 +24,50 @@ By abstracting these technical hurdles, `active-call` allows developers to focus
 
 For detailed information on REST endpoints and WebSocket protocols, please refer to the [API Documentation](docs/api.md).
 
+## Docker Usage
+
+### Configuration
+
+Copy the example config and customize it:
+
+```bash
+cp active-call.example.toml config.toml
+```
+
+### Run with Docker
+
+```bash
+docker run -d \
+  --name active-call \
+  -p 8080:8080 \
+  -p 13050:13050/udp \
+  -p 20000-20100:20000-20100/udp \
+  -v $(pwd)/config.toml:/app/config.toml:ro \
+  -v $(pwd)/config:/app/config \
+  active-call:latest
+```
+
+### Environment Variables
+
+If you have API keys, save them in an `.env` file:
+
+```bash
+TENCENT_APPID=your_app_id
+TENCENT_SECRET_ID=your_secret_id
+TENCENT_SECRET_KEY=your_secret_key
+DASHSCOPE_API_KEY=your_dashscope_api_key
+```
+
+And mount it in the container like :
+
+```bash
+  -v $(pwd)/.env:/app/.env \
+```
+
+### Port Range
+
+Use small range `20000-20100` for local development, bigger range like `20000-30000`, or host network for production.
+
 ## License
 
 This project is licensed under the MIT License.
