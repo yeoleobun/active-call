@@ -22,7 +22,9 @@ COPY static ./static
 # Build the release binary with cargo caching
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release
+    cargo build --release && \
+    mkdir -p /build/bin && \
+    cp /build/target/release/active-call /build/bin/
 
 # ============================================
 # Stage 2: Create the runtime image
@@ -55,7 +57,7 @@ WORKDIR /app
 RUN mkdir -p /app/config/mediacache /app/config/cdr /app/config/recorders /app/static
 
 # Copy built binary and static files
-COPY --from=rust-builder /build/target/release/active-call /app/active-call
+COPY --from=rust-builder /build/bin/active-call /app/active-call
 COPY --from=rust-builder /build/static /app/static
 
 # Set ownership
