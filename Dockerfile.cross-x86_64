@@ -1,0 +1,22 @@
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main
+
+# Install clang, libclang (for bindgen), openssl, and dependencies  
+RUN apt-get update && apt-get install -y \
+    cmake \
+    pkg-config \
+    clang \
+    llvm \
+    libclang-dev \
+    libopus-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Find and set libclang path for bindgen
+RUN find /usr -name 'libclang.so*' -type f 2>/dev/null | head -1
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+# Alternative paths depending on the base image
+ENV LD_LIBRARY_PATH=/usr/lib/llvm-14/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+
+# Set clang as compiler
+ENV CC_x86_64_unknown_linux_gnu=clang
+ENV CXX_x86_64_unknown_linux_gnu=clang++
