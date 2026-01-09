@@ -207,20 +207,12 @@ impl TenFeatureExtractor {
     }
 
     pub fn extract_features(&mut self, audio_frame: &[f32]) -> ndarray::Array1<f32> {
-        // Prepare FFT input buffer
-        // 1. Clear buffer
         self.fft_input.fill(0.0);
-
-        // 2. Use provided pre-emphasized audio
         let copy_len = audio_frame.len().min(WINDOW_SIZE);
         self.fft_input[..copy_len].copy_from_slice(audio_frame);
-
-        // 3. Windowing
         for (i, sample) in self.fft_input.iter_mut().enumerate().take(copy_len) {
             *sample *= self.window[i];
         }
-
-        // 4. FFT
         self.rfft
             .process_with_scratch(
                 &mut self.fft_input,
@@ -228,13 +220,9 @@ impl TenFeatureExtractor {
                 &mut self.fft_scratch,
             )
             .unwrap();
-
-        // 5. Power spectrum
         let n_bins = FFT_SIZE / 2 + 1;
         let scale = 1.0 / FFT_SIZE as f32;
 
-        // Compute power spectrum once
-        // Use iterators to avoid bounds checks
         for (pow, complex) in self.power_spectrum.iter_mut().zip(self.fft_output.iter()) {
             *pow = (complex.re * complex.re + complex.im * complex.im) * scale;
         }
@@ -248,18 +236,13 @@ impl TenFeatureExtractor {
 
             let mut sum = 0.0;
             if start < valid_end {
-                // Use slices for dot product to enable vectorization
                 let filter_row = self.mel_filters.row(i);
-                // Safety: we know the row is contiguous because we created it that way
-                // and we haven't modified layout.
                 if let Some(filter_slice) = filter_row.as_slice() {
                     let filter_sub = &filter_slice[start..valid_end];
                     let power_sub = &self.power_spectrum[start..valid_end];
 
-                    // This dot product should be auto-vectorized
                     sum = super::simd::dot_product(filter_sub, power_sub);
                 } else {
-                    // Fallback if not contiguous (should not happen)
                     for j in start..valid_end {
                         sum += self.mel_filters[[i, j]] * self.power_spectrum[j];
                     }
@@ -268,7 +251,6 @@ impl TenFeatureExtractor {
             mel_features[i] = (sum + EPS).ln();
         }
 
-        // Simple pitch estimation (using 0 as in Python code)
         let pitch_freq = 0.0;
 
         // Combine features
@@ -278,8 +260,6 @@ impl TenFeatureExtractor {
             .assign(&mel_features);
         features[MEL_FILTER_BANK_NUM] = pitch_freq;
 
-        // Feature normalization
-        // Use pre-calculated inverse STDs and iterators
         for (feat, (&mean, &inv_std)) in features
             .iter_mut()
             .zip(FEATURE_MEANS.iter().zip(self.inv_stds.iter()))
@@ -370,8 +350,6 @@ impl Conv2dLayer {
         let out_h = output.h;
         let out_w = output.w;
 
-        // Optimization for Conv1_DW (3x3, s=1, p=0, in=1, out=1)
-        // Input: [3, 41, 1], Output: [1, 39, 1]
         if self.in_channels == 1
             && self.out_channels == 1
             && self.kernel_h == 3
@@ -383,25 +361,17 @@ impl Conv2dLayer {
             let bias = self.bias.as_ref().map(|b| b[0]).unwrap_or(0.0);
             let w = &self.weights; // 9 elements
 
-            // Hardcoded 3x3 convolution
-            // y is always 0 because out_h=1 (input_h=3, k=3, s=1 -> (3-3)/1 + 1 = 1)
             for x in 0..out_w {
-                // input x range: x to x+3
-                // input y range: 0 to 3
                 let mut sum = bias;
 
-                // Unroll 3x3 kernel
-                // Row 0
                 sum += input.get(0, x, 0) * w[0];
                 sum += input.get(0, x + 1, 0) * w[1];
                 sum += input.get(0, x + 2, 0) * w[2];
 
-                // Row 1
                 sum += input.get(1, x, 0) * w[3];
                 sum += input.get(1, x + 1, 0) * w[4];
                 sum += input.get(1, x + 2, 0) * w[5];
 
-                // Row 2
                 sum += input.get(2, x, 0) * w[6];
                 sum += input.get(2, x + 1, 0) * w[7];
                 sum += input.get(2, x + 2, 0) * w[8];
@@ -411,8 +381,6 @@ impl Conv2dLayer {
             return;
         }
 
-        // Optimization for Conv1_PW (1x1, s=1, p=0, in=1, out=16)
-        // Input: [1, 39, 1], Output: [1, 39, 16]
         if self.in_channels == 1
             && self.out_channels == 16
             && self.kernel_h == 1
@@ -440,8 +408,6 @@ impl Conv2dLayer {
             return;
         }
 
-        // Optimization for Conv2_DW (1x3, s=2, p=[0,1,0,1], in=16, out=16, groups=16)
-        // Input: [1, 19, 16], Output: [1, 10, 16]
         if self.groups == 16
             && self.in_channels == 16
             && self.out_channels == 16
@@ -469,13 +435,6 @@ impl Conv2dLayer {
                 let val1 = input.get(0, 1, c);
                 let sum0 = val0 * w1 + val1 * w2 + bias;
                 output.set(0, 0, c, sum0);
-
-                // x=1..9: in_x = 1, 3, 5, ... 17.
-                // x=1: in_x_origin = 1. kx=0->1, kx=1->2, kx=2->3.
-                // ...
-                // x=9: in_x_origin = 17. kx=0->17, kx=1->18, kx=2->19(skip).
-
-                // Middle loop x=1..8
                 for x in 1..9 {
                     let in_x_origin = x * 2 - 1;
                     let v0 = input.get(0, in_x_origin, c);
@@ -494,8 +453,6 @@ impl Conv2dLayer {
             return;
         }
 
-        // Optimization for Conv2_PW (1x1, s=1, p=0, in=16, out=16)
-        // Input: [1, 10, 16], Output: [1, 10, 16]
         if self.in_channels == 16
             && self.out_channels == 16
             && self.kernel_h == 1
@@ -532,8 +489,6 @@ impl Conv2dLayer {
             return;
         }
 
-        // Optimization for Conv3_DW (1x3, s=2, p=[0,1,0,1], in=16, out=16, groups=16)
-        // Input: [1, 10, 16], Output: [1, 5, 16]
         if self.groups == 16
             && self.in_channels == 16
             && self.out_channels == 16
@@ -619,10 +574,6 @@ impl Conv2dLayer {
         let in_c_per_group = self.in_channels / self.groups;
         let out_c_per_group = self.out_channels / self.groups;
 
-        // Optimization: Check if we can use fast path (no padding, stride 1, etc)
-        // But here we have padding and strides.
-
-        // Optimization: Lift bias addition out of inner loop
         if let Some(b) = &self.bias {
             for g in 0..self.groups {
                 for oc in 0..out_c_per_group {
@@ -815,8 +766,6 @@ impl LstmLayer {
 
     fn forward_optimized(&mut self, input: &[f32], hidden: &mut [f32], cell: &mut [f32]) {
         let h_size = self.hidden_size;
-
-        // 1. Compute W_ih * x + b_ih for all gates (i, f, g, o)
         for i in 0..4 * h_size {
             let w_start = i * self.input_size;
             let w_row = &self.weight_ih[w_start..w_start + self.input_size];
@@ -824,8 +773,6 @@ impl LstmLayer {
             self.gates_buffer[i] = dot + self.bias_ih[i];
         }
 
-        // 2. Compute W_hh * h + b_hh for all gates
-        // We can add directly to gates_buffer
         for i in 0..4 * h_size {
             let w_start = i * h_size;
             let w_row = &self.weight_hh[w_start..w_start + h_size];
@@ -833,18 +780,13 @@ impl LstmLayer {
             self.gates_buffer[i] += dot + self.bias_hh[i];
         }
 
-        // 3. Apply activations and update states
-        // ONNX Gates order: i, o, f, g (c)
         for i in 0..h_size {
             let i_gate = crate::media::vad::utils::sigmoid(self.gates_buffer[i]);
             let o_gate = crate::media::vad::utils::sigmoid(self.gates_buffer[i + h_size]);
             let f_gate = crate::media::vad::utils::sigmoid(self.gates_buffer[i + 2 * h_size]);
             let g_gate = crate::media::vad::utils::tanh(self.gates_buffer[i + 3 * h_size]);
 
-            // c_t = f_t * c_{t-1} + i_t * g_t
             cell[i] = f_gate * cell[i] + i_gate * g_gate;
-
-            // h_t = o_t * tanh(c_t)
             hidden[i] = o_gate * crate::media::vad::utils::tanh(cell[i]);
         }
     }
@@ -852,7 +794,7 @@ impl LstmLayer {
 
 pub struct TinyTen {
     config: VADOption,
-    buffer: Vec<f32>, // Store pre-emphasized f32 samples
+    buffer: Vec<f32>,
     pre_emphasis_prev: f32,
     current_timestamp: u64,
     processed_samples: u64,
@@ -913,14 +855,9 @@ impl TinyTen {
         let feature_extractor = TenFeatureExtractor::new();
         let feature_buffer = ndarray::Array2::<f32>::zeros((CONTEXT_WINDOW_LEN, FEATURE_LEN));
 
-        // Initialize layers
-        // Conv1: Input [1, 3, 41, 1]
-        // DW: 3x3, stride 1, pad 0. Out: [1, 1, 39, 1]
         let conv1_dw = Conv2dLayer::new(1, 1, 3, 3, 1, 1, [0, 0, 0, 0], 1);
-        // PW: 1x1, stride 1, pad 0. Out: [1, 1, 39, 16]
         let conv1_pw = Conv2dLayer::new(1, 16, 1, 1, 1, 1, [0, 0, 0, 0], 1);
 
-        // MaxPool: 1x3, stride 1x2. Out: [1, 1, 19, 16]
         let maxpool = MaxPool2dLayer {
             kernel_h: 1,
             kernel_w: 3,
@@ -928,26 +865,18 @@ impl TinyTen {
             stride_w: 2,
         };
 
-        // Conv2: Input [1, 1, 19, 16]
-        // DW: 1x3, stride 2x2, pad [0, 1, 0, 1]. Out: [1, 1, 10, 16]
         let conv2_dw = Conv2dLayer::new(16, 16, 1, 3, 2, 2, [0, 1, 0, 1], 16);
-        // PW: 1x1, stride 1, pad 0. Out: [1, 1, 10, 16]
         let conv2_pw = Conv2dLayer::new(16, 16, 1, 1, 1, 1, [0, 0, 0, 0], 1);
 
-        // Conv3: Input [1, 1, 10, 16]
-        // DW: 1x3, stride 2x2, pad [0, 0, 0, 1]. Out: [1, 1, 5, 16]
         let conv3_dw = Conv2dLayer::new(16, 16, 1, 3, 2, 2, [0, 0, 0, 1], 16);
-        // PW: 1x1, stride 1, pad 0. Out: [1, 1, 5, 16]
         let conv3_pw = Conv2dLayer::new(16, 16, 1, 1, 1, 1, [0, 0, 0, 0], 1);
 
-        // LSTM Input size: 5 * 16 = 80.
         let lstm1 = LstmLayer::new(80, HIDDEN_SIZE);
         let lstm2 = LstmLayer::new(HIDDEN_SIZE, HIDDEN_SIZE);
 
         let dense1 = LinearLayer::new(HIDDEN_SIZE * 2, 32);
         let dense2 = LinearLayer::new(32, 1);
 
-        // Pre-allocate scratch buffers
         let t_input = Tensor3D::new(CONTEXT_WINDOW_LEN, FEATURE_LEN, 1);
         let t_conv1_dw = Tensor3D::new(1, 39, 1);
         let t_conv1_pw = Tensor3D::new(1, 39, 16);
@@ -1002,10 +931,7 @@ impl TinyTen {
     }
 
     pub fn predict(&mut self, audio_frame: &[f32]) -> f32 {
-        // 1. Extract features
         let features = self.feature_extractor.extract_features(audio_frame);
-
-        // 2. Update context window
         for i in 0..CONTEXT_WINDOW_LEN - 1 {
             for j in 0..FEATURE_LEN {
                 self.feature_buffer[[i, j]] = self.feature_buffer[[i + 1, j]];
@@ -1015,23 +941,17 @@ impl TinyTen {
             self.feature_buffer[[CONTEXT_WINDOW_LEN - 1, j]] = features[j];
         }
 
-        // 3. Prepare Input Tensor [1, 3, 41, 1]
-        // H=3 (Time), W=41 (Freq), C=1
-        // Reuse t_input
         for i in 0..CONTEXT_WINDOW_LEN {
             for j in 0..FEATURE_LEN {
                 self.t_input.set(i, j, 0, self.feature_buffer[[i, j]]);
             }
         }
 
-        // 4. Forward Pass
-        // Block 1
         self.conv1_dw
             .forward_into(&self.t_input, &mut self.t_conv1_dw);
         self.conv1_pw
             .forward_into(&self.t_conv1_dw, &mut self.t_conv1_pw);
 
-        // Apply Relu
         for val in self.t_conv1_pw.data.iter_mut() {
             *val = val.max(0.0);
         }
@@ -1039,7 +959,6 @@ impl TinyTen {
         self.maxpool
             .forward_into(&self.t_conv1_pw, &mut self.t_maxpool);
 
-        // Block 2
         self.conv2_dw
             .forward_into(&self.t_maxpool, &mut self.t_conv2_dw);
         self.conv2_pw
@@ -1059,8 +978,6 @@ impl TinyTen {
             *val = val.max(0.0);
         }
 
-        // Flatten for LSTM
-        // x shape should be [1, 5, 16] -> 80 elements
         let lstm_input = &self.t_conv3_pw.data;
 
         // LSTM 1
@@ -1071,8 +988,6 @@ impl TinyTen {
         self.lstm2
             .forward_optimized(&self.h1, &mut self.h2, &mut self.c2);
 
-        // Concat h2, h1 (Graph says concat_1 inputs: lstm2, lstm1)
-        // dense_input_buffer is [h2, h1]
         let h_size = HIDDEN_SIZE;
         self.dense_input_buffer[0..h_size].copy_from_slice(&self.h2);
         self.dense_input_buffer[h_size..2 * h_size].copy_from_slice(&self.h1);
@@ -1170,9 +1085,6 @@ impl TinyTen {
             self.lstm1.weight_hh = w.1.clone();
         }
         if let Some(w) = weights.get("lstm1_bias") {
-            // Split bias into ih and hh if needed, or just use as is.
-            // ONNX LSTM bias is [8*H]. Our LstmLayer expects bias_ih [4*H] and bias_hh [4*H].
-            // Usually first half is W_b, second half is R_b.
             let b = &w.1;
             if b.len() == 8 * HIDDEN_SIZE {
                 self.lstm1.bias_ih = b[0..4 * HIDDEN_SIZE].to_vec();
@@ -1221,13 +1133,9 @@ impl VadEngine for TinyTen {
         if !self.initialized_timestamp {
             self.current_timestamp = frame.timestamp;
             self.initialized_timestamp = true;
-            // Pre-pad with zeros for the initial context
-            // librosa center=True pads n_fft/2 (512).
-            // 512 context makes the first chunk start at the end of the window.
             self.buffer.resize(512, 0.0);
         }
 
-        // Apply pre-emphasis once to NEW samples and push to buffer
         let inv_scale = 1.0 / 32768.0;
         for &sample in samples {
             let s_f32 = sample as f32;
@@ -1239,7 +1147,6 @@ impl VadEngine for TinyTen {
         let mut results = Vec::new();
 
         while self.buffer.len() >= WINDOW_SIZE {
-            // Predict uses the full window but we only drain the hop size
             let window = self.buffer[..WINDOW_SIZE].to_vec();
             let score = self.predict(&window);
 

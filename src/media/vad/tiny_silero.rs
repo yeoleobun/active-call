@@ -120,22 +120,6 @@ impl Conv1dLayer {
         self.bias = Some(b);
     }
 
-    // Forward pass
-    // Input: [in_channels, input_len] (flattened)
-    // Output: [out_channels, output_len] (flattened)
-    // We assume input is column-major or row-major?
-    // Usually [batch, channels, time]. Here batch=1.
-    // So [channels, time].
-    // Let's use [time, channels] for easier iteration?
-    // No, Conv1d usually works on [channels, time].
-    // But for cache locality, [time, channels] might be better if we iterate time.
-    // However, the weights are [out, in, k].
-    // Let's stick to [channels, time] to match standard logic, or [time, channels] if it simplifies.
-    // The STFT output is [3, 129] (Time, Channels).
-    // The Encoder expects [Batch, Channels, Time].
-    // So [129, 3].
-    // Let's use [channels, time] internally.
-
     fn forward(&self, input: &[f32], input_len: usize, output: &mut [f32]) {
         if self.weights.is_empty() {
             panic!(
@@ -190,17 +174,6 @@ impl Conv1dLayer {
                     output[out_idx_base + t] += sum;
                 }
             }
-            // ReLU is not needed for STFT usually?
-            // Wait, Silero STFT is just a Conv1d, does it have ReLU?
-            // The ONNX graph showed it's just Conv.
-            // But my generic forward applies ReLU.
-            // Let's check if STFT output should be ReLU'd.
-            // Usually STFT is linear.
-            // The ONNX graph inspection didn't show ReLU after STFT Conv.
-            // It goes to Magnitude computation.
-            // If I apply ReLU, I kill negative values, which ruins STFT.
-            // FIX: Do NOT apply ReLU for STFT.
-            // How to distinguish? STFT is the only one with kernel > 16 here.
             return;
         }
 
@@ -409,22 +382,15 @@ impl Conv1dLayer {
             }
         }
 
-        // ReLU (Only for Encoders, not STFT)
-        // We assume STFT is handled by the first block and returns early.
         for x in output.iter_mut() {
             if *x < 0.0 {
                 *x = 0.0;
             }
         }
     }
-
-    // Optimized forward for specific shapes?
-    // Since the shapes are small (T=3, 2, 1), we can unroll or specialize.
-    // But let's start with generic.
 }
 
 pub struct TinySilero {
-    // stft: Conv1dLayer, // Replaced by FFT
     fft: Arc<dyn RealToComplex<f32>>,
     window: Vec<f32>,
 
@@ -471,18 +437,14 @@ pub struct TinySilero {
 
 impl TinySilero {
     pub fn new(config: VADOption) -> Result<Self> {
-        // Initialize FFT
         let mut planner = RealFftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(STFT_WINDOW_SIZE);
         let fft_scratch_len = fft.get_scratch_len();
         let fft_output_len = STFT_WINDOW_SIZE / 2 + 1;
 
-        // Initialize Hann Window
         let window = super::utils::generate_hann_window(STFT_WINDOW_SIZE, true);
 
-        // Initialize with zeros
         let mut vad = Self {
-            // stft: Conv1dLayer::new(1, 258, 256, 128, 0),
             fft,
             window,
 
@@ -612,20 +574,9 @@ impl TinySilero {
     }
 
     pub fn predict(&mut self, audio: &[f32]) -> f32 {
-        // 1. STFT via FFT
-        // Input: [512]
-        // Output: [129, 3] (Magnitude)
-
-        // We have 3 frames with stride 128
-        // Frame 0: 0..256
-        // Frame 1: 128..384
-        // Frame 2: 256..512
-
         for t in 0..3 {
             let start = t * STFT_STRIDE;
             // Copy and Window
-            // self.buf_fft_input.copy_from_slice(&audio[start..end]); // Can't do this directly if we want to window
-
             for i in 0..STFT_WINDOW_SIZE {
                 self.buf_fft_input[i] = audio[start + i] * self.window[i];
             }
@@ -639,44 +590,21 @@ impl TinySilero {
                 )
                 .unwrap();
 
-            // Compute Magnitude and fill buf_mag
-            // buf_mag layout: [129, 3] -> [ch0_t0, ch0_t1, ch0_t2, ch1_t0, ...]
-            // buf_fft_output has 129 complex bins
-
             for i in 0..129 {
                 let complex = self.buf_fft_output[i];
                 let mag = complex.norm(); // sqrt(re^2 + im^2)
-
-                // Store in interleaved format [Channels, Time]
-                // Index = Channel * Time_Dim + Time_Index
                 self.buf_mag[i * 3 + t] = mag;
             }
         }
 
-        // 2. Encoder
-        // Enc0: [129, 3] -> [128, 3]
         self.enc0.forward(&self.buf_mag, 3, &mut self.buf_enc0_out);
-
-        // Enc1: [128, 3] -> [64, 2]
         self.enc1
             .forward(&self.buf_enc0_out, 3, &mut self.buf_enc1_out);
-
-        // Enc2: [64, 2] -> [64, 1]
         self.enc2
             .forward(&self.buf_enc1_out, 2, &mut self.buf_enc2_out);
-
-        // Enc3: [64, 1] -> [128, 1]
         self.enc3
             .forward(&self.buf_enc2_out, 1, &mut self.buf_enc3_out);
-
-        // 3. LSTM
-        // Input: [128] (from Enc3, t=0)
-        // State: h, c
-
-        // Copy initial input to temp buffer to avoid borrow checker issues and allocations
         self.buf_lstm_input.copy_from_slice(&self.buf_enc3_out);
-
-        // Shared weights for both layers
         let (w_ih, w_hh, b_ih, b_hh) = (
             &self.lstm_w_ih,
             &self.lstm_w_hh,
@@ -685,9 +613,6 @@ impl TinySilero {
         );
 
         self.buf_gates.fill(0.0);
-
-        // W_ih * x + b_ih
-        // x is self.buf_lstm_input
         for i in 0..4 * HIDDEN_SIZE {
             let sum = b_ih[i]
                 + dot_product_128(
@@ -704,8 +629,6 @@ impl TinySilero {
             self.buf_gates[i] += sum;
         }
 
-        // Apply activations
-        // PyTorch LSTM weights order: Input, Forget, Cell, Output (IFCO)
         let chunk = HIDDEN_SIZE;
         for j in 0..HIDDEN_SIZE {
             // IFCO order
@@ -721,17 +644,11 @@ impl TinySilero {
             self.h[0][j] = h_val;
         }
 
-        // 4. Output
-        // Input: h_new (from layer 1) [128] -> [128, 1]
-        // Conv1d 1x1 is just Dot Product + Bias
-        // Output: [1, 1]
-
         let w = &self.out_layer.weights; // [1, 128, 1] -> [128]
         let b = self.out_layer.bias.as_ref().unwrap()[0];
 
         let mut sum = b;
         for j in 0..HIDDEN_SIZE {
-            // Apply ReLU (Found in ONNX graph trace: decoder/decoder/1/Relu)
             let val = self.h[0][j];
             let val_relu = if val > 0.0 { val } else { 0.0 };
             sum += w[j] * val_relu;
