@@ -1,5 +1,6 @@
 use audio_codec::CodecType;
-use webrtc::sdp::SessionDescription;
+use rustrtc::MediaKind;
+use rustrtc::sdp::SessionDescription;
 
 #[derive(Clone)]
 pub struct PeerMedia {
@@ -88,35 +89,44 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
         rtp_map: Vec::new(),
     };
 
-    match sdp.connection_information {
-        Some(ref connection_information) => {
-            connection_information.address.as_ref().map(|address| {
-                if peer_media.rtp_addr.is_empty() {
-                    peer_media.rtp_addr = address.address.clone();
-                }
-                if peer_media.rtcp_addr.is_empty() {
-                    peer_media.rtcp_addr = address.address.clone();
-                }
-            });
-        }
-        None => {}
-    }
-
-    for media in sdp.media_descriptions.iter() {
-        for attribute in media.attributes.iter() {
-            if attribute.key == "rtpmap" {
-                attribute.value.as_ref().map(|v| {
-                    if let Ok((payload_type, codec, clock_rate, channel_count)) = parse_rtpmap(v) {
-                        peer_media
-                            .rtp_map
-                            .push((payload_type, (codec, clock_rate, channel_count)));
+    for media in sdp.media_sections.iter() {
+        // Match media type (audio/video)
+        let kind_str = match media.kind {
+            MediaKind::Audio => "audio",
+            MediaKind::Video => "video",
+            _ => "unknown",
+        };
+        if kind_str == media_type {
+            for attribute in media.attributes.iter() {
+                if attribute.key == "rtpmap" {
+                    if let Some(value) = &attribute.value {
+                        if let Ok((pt, codec, clock, channels)) = parse_rtpmap(value) {
+                            peer_media.rtp_map.push((pt, (codec, clock, channels)));
+                        }
                     }
-                });
+                }
+                if attribute.key == "rtcp" {
+                    attribute.value.as_ref().map(|v| {
+                        // Parse the RTCP port from the attribute value
+                        // Format is typically "port [IN IP4 address]"
+                        let parts: Vec<&str> = v.split_whitespace().collect();
+                        if !parts.is_empty() {
+                            if let Ok(port) = parts[0].parse::<u16>() {
+                                peer_media.rtcp_port = port;
+                            }
+                            if parts.len() >= 4 {
+                                peer_media.rtcp_addr = parts[3].to_string();
+                            }
+                        }
+                    });
+                }
+                if attribute.key == "rtcp-mux" {
+                    peer_media.rtcp_mux = true;
+                }
             }
-        }
 
-        if media.media_name.media == media_type {
-            media.media_name.formats.iter().for_each(|format| {
+            // Process formats
+            media.formats.iter().for_each(|format| {
                 if let Ok(digit) = format.parse::<u8>() {
                     // Dynamic payload type
                     if digit >= 96 && digit <= 127 {
@@ -136,51 +146,40 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
                     }
                 }
             });
-            peer_media.rtp_port = media.media_name.port.value as u16;
+
+            peer_media.rtp_port = media.port;
             peer_media.rtcp_port = peer_media.rtp_port + 1;
 
-            // Always use media-level connection info if present (overrides session-level)
-            // RFC 4566 5.7.  Connection Data ("c=")
-            //    A session description MUST contain either at least one "c=" field in
-            //    each media description or a single "c=" field at the session level.
-            //    It MAY contain a single session-level "c=" field and additional "c="
-            //    field(s) per media description, in which case the per-media values
-            //    override the session-level settings for the respective media.
-
-            match media.connection_information {
-                Some(ref connection_information) => {
-                    connection_information.address.as_ref().map(|address| {
-                        if peer_media.rtp_addr.is_empty() {
-                            peer_media.rtp_addr = address.address.clone();
-                        }
-                        if peer_media.rtcp_addr.is_empty() {
-                            peer_media.rtcp_addr = address.address.clone();
-                        }
-                    });
+            // Connection info from media level
+            if let Some(conn) = &media.connection {
+                // format typically: IN IP4 1.2.3.4
+                let parts: Vec<&str> = conn.split_whitespace().collect();
+                // Expect 3 parts: NetType AddrType Addr
+                if parts.len() >= 3 {
+                    // parts[2] is address
+                    if peer_media.rtp_addr.is_empty() {
+                        peer_media.rtp_addr = parts[2].to_string();
+                    }
+                    if peer_media.rtcp_addr.is_empty() {
+                        peer_media.rtcp_addr = parts[2].to_string();
+                    }
                 }
-                None => {}
+            } else if let Some(conn) = &sdp.session.connection {
+                // Fallback to session level
+                let parts: Vec<&str> = conn.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    if peer_media.rtp_addr.is_empty() {
+                        peer_media.rtp_addr = parts[2].to_string();
+                    }
+                    if peer_media.rtcp_addr.is_empty() {
+                        peer_media.rtcp_addr = parts[2].to_string();
+                    }
+                }
             }
-            for attribute in media.attributes.iter() {
-                if attribute.key == "rtcp" {
-                    attribute.value.as_ref().map(|v| {
-                        // Parse the RTCP port from the attribute value
-                        // Format is typically "port [IN IP4 address]"
-                        let parts: Vec<&str> = v.split_whitespace().collect();
-                        if !parts.is_empty() {
-                            if let Ok(port) = parts[0].parse::<u16>() {
-                                peer_media.rtcp_port = port;
-                            }
-                            if parts.len() >= 4 {
-                                peer_media.rtcp_addr = parts[3].to_string();
-                            }
-                        }
-                    });
-                }
-                if attribute.key == "rtcp-mux" {
-                    peer_media.rtcp_mux = true;
-                    peer_media.rtcp_addr = peer_media.rtp_addr.clone();
-                    peer_media.rtcp_port = peer_media.rtp_port;
-                }
+            // Update rtcp_mux address after parsing everything
+            if peer_media.rtcp_mux {
+                peer_media.rtcp_addr = peer_media.rtp_addr.clone();
+                peer_media.rtcp_port = peer_media.rtp_port;
             }
         }
     }
@@ -191,8 +190,7 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
 mod tests {
     use crate::media::negotiate::{prefer_audio_codec, select_peer_media};
     use audio_codec::CodecType;
-    use std::io::Cursor;
-    use webrtc::sdp::SessionDescription;
+    use rustrtc::sdp::SessionDescription;
 
     #[test]
     fn test_parse_freeswitch_sdp() {
@@ -206,8 +204,8 @@ a=rtpmap:0 PCMU/8000
 a=rtpmap:101 telephone-event/8000
 a=fmtp:101 0-16
 a=ptime:20"#;
-        let mut reader = Cursor::new(offer.as_bytes());
-        let offer_sdp = SessionDescription::unmarshal(&mut reader).expect("Failed to parse SDP");
+        let offer_sdp = SessionDescription::parse(rustrtc::sdp::SdpType::Offer, offer)
+            .expect("Failed to parse SDP");
         let peer_media = select_peer_media(&offer_sdp, "audio").unwrap();
         assert_eq!(peer_media.rtp_port, 26328);
         assert_eq!(peer_media.rtcp_port, 26329);

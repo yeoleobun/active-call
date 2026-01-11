@@ -170,7 +170,8 @@ struct EventHeader {
 async fn connect(task_id: String, option: SynthesisOption) -> Result<WsStream> {
     let api_key = option
         .secret_key
-        .as_ref()
+        .clone()
+        .or_else(|| std::env::var("DASHSCOPE_API_KEY").ok())
         .ok_or_else(|| anyhow!("Aliyun TTS: missing api key"))?;
     let ws_url = option
         .endpoint

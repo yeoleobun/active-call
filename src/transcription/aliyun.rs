@@ -240,7 +240,8 @@ impl AliyunAsrClientInner {
         let api_key = self
             .option
             .secret_key
-            .as_deref()
+            .clone()
+            .or_else(|| std::env::var("DASHSCOPE_API_KEY").ok())
             .ok_or_else(|| anyhow!("No DASHSCOPE_API_KEY provided"))?;
 
         let ws_url = self
@@ -282,7 +283,10 @@ impl AliyunAsrClient {
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let begin_time = crate::media::get_timestamp();
-        let start_msg = RunTaskCommand::new(ctx.track_id.clone(), &ctx.option);
+        
+        // Use a UUID for Aliyun task_id to avoid issues with special characters in track_id (like SIP dialog IDs)
+        let aliyun_task_id = Uuid::new_v4().to_string();
+        let start_msg = RunTaskCommand::new(aliyun_task_id.clone(), &ctx.option);
 
         if let Ok(msg_json) = serde_json::to_string(&start_msg) {
             if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
@@ -291,98 +295,107 @@ impl AliyunAsrClient {
             }
         }
 
-        let track_id_clone = ctx.track_id.clone();
+        let track_id_for_recv = ctx.track_id.clone();
+        let track_id_for_send = ctx.track_id.clone();
+        let aliyun_task_id_for_finish = aliyun_task_id.clone();
+
         let recv_loop = async move {
+            let track_id = track_id_for_recv;
             while let Some(msg) = ws_receiver.next().await {
                 match msg {
-                    Ok(Message::Text(text)) => match serde_json::from_str::<AsrEvent>(&text) {
-                        Ok(response) => {
-                            let task_id = response.header.task_id.clone();
-                            debug!(ctx.track_id, task_id, "Task: {}", response.header.event);
-                            if response.header.event == "task-failed" {
-                                let code = response.header.error_code.expect("mising_code");
-                                let message =
-                                    response.header.error_message.expect("mising error message");
-                                let error =
-                                    format!("Error from ASR service: {} ({})", code, message);
-                                warn!("{}", error);
-                                return Err(anyhow!(error));
-                            }
-                            if response.header.event == "task-finished" {
-                                break;
-                            }
-
-                            if response.header.event == "task-started" {
-                                continue;
-                            }
-
-                            let payload = response.payload.ok_or(anyhow!("missing payload"))?;
-                            let output = payload.output.ok_or(anyhow!("missing output"))?;
-
-                            if output.sentence.heartbeat.unwrap_or(false) {
-                                continue;
-                            }
-
-                            let sentence = output.sentence;
-                            let words = sentence.words;
-                            let sentence_start_time = begin_time + sentence.begin_time as u64;
-                            let sentence_end_time = sentence_start_time
-                                + words.last().map(|w| w.end_time as u64).unwrap_or(0);
-                            let text = sentence.text;
-
-                            let event = if sentence.sentence_end {
-                                SessionEvent::AsrFinal {
-                                    track_id: task_id.clone(),
-                                    index: sentence.sentence_id,
-                                    text,
-                                    timestamp: crate::media::get_timestamp(),
-                                    start_time: Some(sentence_start_time),
-                                    end_time: Some(sentence_end_time),
+                    Ok(Message::Text(text)) => {
+                        debug!(track_id = %track_id, "Received ASR text message: {}", text);
+                        match serde_json::from_str::<AsrEvent>(&text) {
+                            Ok(response) => {
+                                let task_id = response.header.task_id.clone();
+                                debug!(track_id, task_id, "Task: {}", response.header.event);
+                                if response.header.event == "task-failed" {
+                                    let code = response.header.error_code.expect("mising_code");
+                                    let message = response
+                                        .header
+                                        .error_message
+                                        .expect("mising error message");
+                                    let error =
+                                        format!("Error from ASR service: {} ({})", code, message);
+                                    warn!("{}", error);
+                                    return Err(anyhow!(error));
                                 }
-                            } else {
-                                SessionEvent::AsrDelta {
-                                    track_id: task_id.clone(),
-                                    index: sentence.sentence_id,
-                                    text,
-                                    timestamp: crate::media::get_timestamp(),
-                                    start_time: Some(sentence_start_time),
-                                    end_time: Some(sentence_end_time),
+                                if response.header.event == "task-finished" {
+                                    break;
                                 }
-                            };
-                            event_sender.send(event).ok();
 
-                            let diff_time = (crate::media::get_timestamp() - begin_time) as u32;
-                            let metrics_event = if sentence.sentence_end {
-                                SessionEvent::Metrics {
-                                    timestamp: crate::media::get_timestamp(),
-                                    key: "completed.asr.aliyun".to_string(),
-                                    data: serde_json::json!({
-                                        "sentence_id": sentence.sentence_id,
-                                    }),
-                                    duration: diff_time,
+                                if response.header.event == "task-started" {
+                                    continue;
                                 }
-                            } else {
-                                SessionEvent::Metrics {
-                                    timestamp: crate::media::get_timestamp(),
-                                    key: "ttfb.asr.aliyun".to_string(),
-                                    data: serde_json::json!({
-                                        "sentence_id": sentence.sentence_id,
-                                    }),
-                                    duration: diff_time,
+
+                                let payload = response.payload.ok_or(anyhow!("missing payload"))?;
+                                let output = payload.output.ok_or(anyhow!("missing output"))?;
+
+                                if output.sentence.heartbeat.unwrap_or(false) {
+                                    continue;
                                 }
-                            };
-                            event_sender.send(metrics_event).ok();
+
+                                let sentence = output.sentence;
+                                let words = sentence.words;
+                                let sentence_start_time = begin_time + sentence.begin_time as u64;
+                                let sentence_end_time = sentence_start_time
+                                    + words.last().map(|w| w.end_time as u64).unwrap_or(0);
+                                let text = sentence.text;
+
+                                let event = if sentence.sentence_end {
+                                    SessionEvent::AsrFinal {
+                                        track_id: track_id.clone(),
+                                        index: sentence.sentence_id,
+                                        text,
+                                        timestamp: crate::media::get_timestamp(),
+                                        start_time: Some(sentence_start_time),
+                                        end_time: Some(sentence_end_time),
+                                    }
+                                } else {
+                                    SessionEvent::AsrDelta {
+                                        track_id: track_id.clone(),
+                                        index: sentence.sentence_id,
+                                        text,
+                                        timestamp: crate::media::get_timestamp(),
+                                        start_time: Some(sentence_start_time),
+                                        end_time: Some(sentence_end_time),
+                                    }
+                                };
+                                event_sender.send(event).ok();
+
+                                let diff_time = (crate::media::get_timestamp() - begin_time) as u32;
+                                let metrics_event = if sentence.sentence_end {
+                                    SessionEvent::Metrics {
+                                        timestamp: crate::media::get_timestamp(),
+                                        key: "completed.asr.aliyun".to_string(),
+                                        data: serde_json::json!({
+                                            "sentence_id": sentence.sentence_id,
+                                        }),
+                                        duration: diff_time,
+                                    }
+                                } else {
+                                    SessionEvent::Metrics {
+                                        timestamp: crate::media::get_timestamp(),
+                                        key: "ttfb.asr.aliyun".to_string(),
+                                        data: serde_json::json!({
+                                            "sentence_id": sentence.sentence_id,
+                                        }),
+                                        duration: diff_time,
+                                    }
+                                };
+                                event_sender.send(metrics_event).ok();
+                            }
+                            Err(e) => {
+                                warn!(track_id, "Failed to parse ASR response: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            warn!(ctx.track_id, "Failed to parse ASR response: {}", e);
-                        }
-                    },
+                    }
                     Ok(Message::Close(_)) => {
-                        info!(ctx.track_id, "WebSocket connection closed by server");
+                        info!(track_id = %track_id, "WebSocket connection closed by server");
                         break;
                     }
                     Err(e) => {
-                        warn!(ctx.track_id, "WebSocket error: {}", e);
+                        warn!(track_id = %track_id, "WebSocket error: {}", e);
                         return Err(anyhow!("WebSocket error: {}", e));
                     }
                     _ => {
@@ -395,18 +408,24 @@ impl AliyunAsrClient {
 
         let token_clone = token.clone();
         let send_loop = async move {
+            let mut total_bytes = 0;
             while let Some(audio_data) = audio_rx.recv().await {
                 if token_clone.is_cancelled() {
                     break;
                 }
 
+                let data_len = audio_data.len();
                 if let Err(e) = ws_sender.send(Message::Binary(audio_data.into())).await {
                     warn!("Failed to send audio data: {}", e);
                     break;
                 }
+                total_bytes += data_len;
+                if total_bytes % 32000 == 0 {
+                    debug!(track_id = %track_id_for_send, "Sent {} bytes of audio to Aliyun", total_bytes);
+                }
             }
 
-            let end_msg = FinishTaskCommand::new(track_id_clone);
+            let end_msg = FinishTaskCommand::new(aliyun_task_id_for_finish);
 
             if let Ok(msg_json) = serde_json::to_string(&end_msg) {
                 if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
@@ -414,14 +433,15 @@ impl AliyunAsrClient {
                 }
             }
 
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         };
+
+        tokio::spawn(send_loop);
 
         tokio::select! {
             result = recv_loop => result,
-            result = send_loop => result,
             _ = token.cancelled() => {
-                Ok(())
+                Ok::<(), anyhow::Error>(())
             }
         }
     }
@@ -505,7 +525,6 @@ impl AliyunAsrClientBuilder {
         let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let token = self.token.unwrap_or_default();
         let event_sender = self.event_sender;
-        info!(%track_id, "Starting Aliyun ASR client");
 
         tokio::spawn(async move {
             // Handle wait_for_answer if enabled
@@ -535,6 +554,7 @@ impl AliyunAsrClientBuilder {
                 }
             };
 
+            info!(%track_id, option=?inner.option, "Starting Aliyun ASR client");
             let ctx = WebSocketContext {
                 track_id: track_id.clone(),
                 option: self.option,

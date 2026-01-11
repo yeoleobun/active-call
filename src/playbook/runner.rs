@@ -1,9 +1,11 @@
+use crate::CallOption;
 use crate::call::ActiveCallRef;
 use anyhow::{Result, anyhow};
 use tracing::{error, info};
-use crate::CallOption;
 
-use super::{Playbook, PlaybookConfig, dialogue::DialogueHandler, handler::LlmHandler};
+use super::{
+    InterruptionStrategy, Playbook, PlaybookConfig, dialogue::DialogueHandler, handler::LlmHandler,
+};
 
 pub struct PlaybookRunner {
     handler: Box<dyn DialogueHandler>,
@@ -11,6 +13,10 @@ pub struct PlaybookRunner {
 }
 
 impl PlaybookRunner {
+    pub fn with_handler(handler: Box<dyn DialogueHandler>, call: ActiveCallRef) -> Self {
+        Self { handler, call }
+    }
+
     pub fn new(playbook: Playbook, call: ActiveCallRef) -> Result<Self> {
         if let Ok(mut state) = call.call_state.write() {
             // Ensure option exists before applying config
@@ -22,10 +28,19 @@ impl PlaybookRunner {
             }
         }
 
-        let handler: Box<dyn DialogueHandler> = if let Some(llm_config) = playbook.config.llm {
-            let mut llm_handler = LlmHandler::new(llm_config);
+        let handler: Box<dyn DialogueHandler> = if let Some(mut llm_config) = playbook.config.llm {
+            if let Some(greeting) = playbook.config.greeting {
+                llm_config.greeting = Some(greeting);
+            }
+            let strategy = playbook
+                .config
+                .interruption
+                .unwrap_or(InterruptionStrategy::Both);
+
+            let mut llm_handler = LlmHandler::new(llm_config, strategy);
             // Set event sender for debugging
             llm_handler.set_event_sender(call.event_sender.clone());
+            llm_handler.set_call(call.clone());
             Box::new(llm_handler)
         } else {
             return Err(anyhow!(
@@ -42,6 +57,8 @@ impl PlaybookRunner {
             self.call.session_id
         );
 
+        let mut event_receiver = self.call.event_sender.subscribe();
+
         if let Ok(commands) = self.handler.on_start().await {
             for cmd in commands {
                 if let Err(e) = self.call.enqueue_command(cmd).await {
@@ -50,7 +67,30 @@ impl PlaybookRunner {
             }
         }
 
-        let mut event_receiver = self.call.event_sender.subscribe();
+        // Wait for call to be established before running playbook greeting
+        let mut answered = false;
+        if let Ok(state) = self.call.call_state.read() {
+            if state.answer_time.is_some() {
+                answered = true;
+            }
+        }
+
+        if !answered {
+            info!("Waiting for call establishment...");
+            while let Ok(event) = event_receiver.recv().await {
+                match &event {
+                    crate::event::SessionEvent::Answer { .. } => {
+                        info!("Call established, proceeding to playbook handles");
+                        break;
+                    }
+                    crate::event::SessionEvent::Hangup { .. } => {
+                        info!("Call hung up before established, stopping");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         while let Ok(event) = event_receiver.recv().await {
             match &event {
@@ -76,10 +116,18 @@ impl PlaybookRunner {
 }
 
 pub fn apply_playbook_config(option: &mut CallOption, config: &PlaybookConfig) {
-    if let Some(asr) = config.asr.clone() {
+    let api_key = config.llm.as_ref().and_then(|llm| llm.api_key.clone());
+
+    if let Some(mut asr) = config.asr.clone() {
+        if asr.secret_key.is_none() {
+            asr.secret_key = api_key.clone();
+        }
         option.asr = Some(asr);
     }
-    if let Some(tts) = config.tts.clone() {
+    if let Some(mut tts) = config.tts.clone() {
+        if tts.secret_key.is_none() {
+            tts.secret_key = api_key.clone();
+        }
         option.tts = Some(tts);
     }
     if let Some(vad) = config.vad.clone() {
@@ -94,7 +142,10 @@ pub fn apply_playbook_config(option: &mut CallOption, config: &PlaybookConfig) {
     if let Some(extra) = config.extra.clone() {
         option.extra = Some(extra);
     }
-    if let Some(eou) = config.eou.clone() {
+    if let Some(mut eou) = config.eou.clone() {
+        if eou.secret_key.is_none() {
+            eou.secret_key = api_key;
+        }
         option.eou = Some(eou);
     }
 }
@@ -102,11 +153,11 @@ pub fn apply_playbook_config(option: &mut CallOption, config: &PlaybookConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::{
         EouOption, media::recorder::RecorderOption, media::vad::VADOption,
         synthesis::SynthesisOption, transcription::TranscriptionOption,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn apply_playbook_config_sets_fields() {
@@ -141,5 +192,35 @@ mod tests {
         assert!(option.recorder.is_some());
         assert_eq!(option.extra, Some(extra));
         assert!(option.eou.is_some());
+    }
+
+    #[test]
+    fn apply_playbook_config_propagates_api_key() {
+        let mut option = CallOption::default();
+        let config = PlaybookConfig {
+            llm: Some(super::super::LlmConfig {
+                api_key: Some("test-key".to_string()),
+                ..Default::default()
+            }),
+            asr: Some(TranscriptionOption::default()),
+            tts: Some(SynthesisOption::default()),
+            eou: Some(EouOption::default()),
+            ..Default::default()
+        };
+
+        apply_playbook_config(&mut option, &config);
+
+        assert_eq!(
+            option.asr.as_ref().unwrap().secret_key,
+            Some("test-key".to_string())
+        );
+        assert_eq!(
+            option.tts.as_ref().unwrap().secret_key,
+            Some("test-key".to_string())
+        );
+        assert_eq!(
+            option.eou.as_ref().unwrap().secret_key,
+            Some("test-key".to_string())
+        );
     }
 }

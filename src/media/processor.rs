@@ -8,6 +8,22 @@ pub trait Processor: Send + Sync + Any {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()>;
 }
 
+pub fn convert_to_mono(samples: &mut Vec<i16>, channels: u16) {
+    if channels != 2 {
+        return;
+    }
+    let mut i = 0;
+    let mut j = 0;
+    while i < samples.len() {
+        let l = samples[i] as i32;
+        let r = samples[i + 1] as i32;
+        samples[j] = ((l + r) / 2) as i16;
+        i += 2;
+        j += 1;
+    }
+    samples.truncate(j);
+}
+
 impl Default for AudioFrame {
     fn default() -> Self {
         Self {
@@ -15,6 +31,7 @@ impl Default for AudioFrame {
             samples: Samples::Empty,
             timestamp: 0,
             sample_rate: 16000,
+            channels: 1,
         }
     }
 }
@@ -32,7 +49,7 @@ impl Samples {
 #[derive(Clone)]
 pub struct ProcessorChain {
     processors: Arc<Mutex<Vec<Box<dyn Processor>>>>,
-    codec: Arc<Mutex<TrackCodec>>,
+    pub codec: Arc<Mutex<TrackCodec>>,
     sample_rate: u32,
     pub force_decode: bool,
 }
@@ -78,11 +95,13 @@ impl ProcessorChain {
         } = &frame.samples
         {
             if TrackCodec::is_audio(*payload_type) {
-                let samples =
-                    self.codec
-                        .lock()
-                        .unwrap()
-                        .decode(*payload_type, &payload, self.sample_rate);
+                let samples = self.codec.lock().unwrap().decode(
+                    *payload_type,
+                    &payload,
+                    frame.channels,
+                    self.sample_rate,
+                );
+                frame.channels = 1; // Since we converted to mono in decode
                 frame.samples = Samples::PCM { samples };
                 frame.sample_rate = self.sample_rate;
             }

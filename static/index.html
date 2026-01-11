@@ -317,9 +317,14 @@
             <div class="panel">
                 <h2>Controls</h2>
                 <div class="controls">
-                    <button id="run-btn" disabled>▶ Run Selected</button>
+                    <button id="run-btn" disabled>▶ Run Selected (WebRTC)</button>
                     <button id="hangup-btn" class="danger" disabled>⏹ Hangup</button>
                     <span id="status" class="status idle">Idle</span>
+                </div>
+                <div class="controls" style="margin-top: 15px; border-top: 1px solid #3c3c3c; padding-top: 15px;">
+                    <input type="text" id="sip-uri" placeholder="sip:user@host"
+                        style="background: #1e1e1e; color: #fff; border: 1px solid #3c3c3c; padding: 8px; border-radius: 4px; flex-grow: 1; min-width: 250px;">
+                    <button id="sip-call-btn" disabled>📞 SIP Call</button>
                 </div>
             </div>
             <div class="debug-panels">
@@ -367,6 +372,7 @@
                         document.querySelectorAll('#playbook-list li').forEach(el => el.classList.remove('active'));
                         li.classList.add('active');
                         document.getElementById('run-btn').disabled = false;
+                        document.getElementById('sip-call-btn').disabled = false;
                     };
                     list.appendChild(li);
                 });
@@ -403,7 +409,79 @@
             updateStatus('idle');
             document.getElementById('hangup-btn').disabled = true;
             document.getElementById('run-btn').disabled = false;
+            document.getElementById('sip-call-btn').disabled = false;
         };
+
+        document.getElementById('sip-call-btn').onclick = async () => {
+            const callee = document.getElementById('sip-uri').value;
+            if (!selectedPlaybook || !callee) {
+                alert('Please select a playbook and enter a SIP URI');
+                return;
+            }
+            logEvent('INFO', 'Starting SIP call for playbook: ' + selectedPlaybook + ' to ' + callee);
+
+            try {
+                const res = await fetch('/api/playbook/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ playbook: selectedPlaybook, type: 'sip', to: callee })
+                });
+                const data = await res.json();
+                const sessionId = data.session_id;
+                logEvent('INFO', 'Session ID: ' + sessionId);
+
+                startSipCall(sessionId, callee);
+            } catch (e) {
+                logEvent('ERROR', 'Failed to start SIP call: ' + e);
+            }
+        };
+
+        async function startSipCall(sessionId, callee) {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${protocol}//${window.location.host}/call/sip?id=${sessionId}`;
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                logEvent('WS', 'WebSocket connected to server (SIP monitoring)');
+                updateStatus('connected');
+                document.getElementById('hangup-btn').disabled = false;
+                document.getElementById('run-btn').disabled = true;
+                document.getElementById('sip-call-btn').disabled = true;
+
+                const inviteCmd = {
+                    command: 'invite',
+                    option: { callee: callee }
+                };
+                logEvent('WS', 'Sending invite command for callee: ' + callee);
+                ws.send(JSON.stringify(inviteCmd));
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    logEvent('WS', 'Received event: ' + (msg.event || 'unknown'));
+                    handleEvent(msg);
+
+                    if (msg.event === 'answer') {
+                        updateStatus('calling');
+                    }
+                } catch (e) {
+                    logEvent('ERROR', 'Failed to handle message: ' + e.message);
+                }
+            };
+
+            ws.onerror = (error) => {
+                logEvent('ERROR', 'WebSocket error');
+            };
+
+            ws.onclose = () => {
+                logEvent('WS', 'Disconnected');
+                updateStatus('idle');
+                document.getElementById('hangup-btn').disabled = true;
+                document.getElementById('run-btn').disabled = false;
+                document.getElementById('sip-call-btn').disabled = false;
+            };
+        }
 
         async function startCall(sessionId) {
             let offer;

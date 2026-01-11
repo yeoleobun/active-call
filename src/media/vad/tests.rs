@@ -62,6 +62,7 @@ async fn test_vad_with_noise_denoise() {
             samples: Samples::PCM { samples: chunk_vec },
             sample_rate,
             timestamp: i as u64 * chunk_duration_ms,
+            channels: 1,
         };
         nr.process_frame(&mut frame).unwrap();
         vad.process_frame(&mut frame).unwrap();
@@ -144,6 +145,7 @@ async fn test_vad_speech_intervals() {
                 samples: Samples::PCM { samples: chunk_vec },
                 sample_rate,
                 timestamp: (processed_samples * 1000) / sample_rate as u64,
+                channels: 1,
             };
             processed_samples += frame_size as u64;
 
@@ -197,6 +199,7 @@ async fn test_silence_timeout() {
             samples: vec![1; 160], // 10ms of audio at 16kHz
         },
         sample_rate: 16000,
+        channels: 1,
     };
 
     // First send some strong speech frames

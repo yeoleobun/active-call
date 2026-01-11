@@ -25,7 +25,7 @@ pub struct TrackConfig {
 impl Default for TrackConfig {
     fn default() -> Self {
         Self {
-            codec: CodecType::PCMU,
+            codec: CodecType::Opus,
             ptime: Duration::from_millis(20),
             samplerate: 16000,
             channels: 1,
@@ -52,10 +52,9 @@ impl TrackConfig {
 
 pub mod file;
 pub mod media_pass;
-pub mod rtp;
+pub mod rtc;
 pub mod track_codec;
 pub mod tts;
-pub mod webrtc;
 pub mod websocket;
 #[async_trait]
 pub trait Track: Send + Sync {

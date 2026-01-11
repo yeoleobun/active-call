@@ -139,11 +139,12 @@ pub struct ReferOption {
 }
 
 #[skip_serializing_none]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EouOption {
     pub r#type: Option<String>,
     pub endpoint: Option<String>,
+    #[serde(alias = "apiKey")]
     pub secret_key: Option<String>,
     pub secret_id: Option<String>,
     /// max timeout in milliseconds

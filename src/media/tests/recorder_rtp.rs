@@ -39,6 +39,7 @@ async fn test_recorder_rtp_g711() -> Result<()> {
         },
         timestamp: 0,
         sample_rate: 8000,
+        channels: 1,
     };
     tx.send(frame)?;
 
@@ -93,6 +94,7 @@ async fn test_recorder_rtp_g729() -> Result<()> {
         },
         timestamp: 0,
         sample_rate: 8000,
+        channels: 1,
     };
     tx.send(frame)?;
 

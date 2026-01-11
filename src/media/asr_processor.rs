@@ -12,9 +12,15 @@ impl Processor for AsrProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
         match &frame.samples {
             Samples::PCM { samples } => {
-                self.asr_client.send_audio(&samples)?;
+                if !samples.is_empty() {
+                    self.asr_client.send_audio(&samples)?;
+                } else {
+                    tracing::debug!(track_id = %frame.track_id, "AsrProcessor: empty PCM samples");
+                }
             }
-            _ => {}
+            _ => {
+                tracing::debug!(track_id = %frame.track_id, "AsrProcessor: skipping non-PCM frame");
+            }
         }
         Ok(())
     }

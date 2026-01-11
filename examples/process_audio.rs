@@ -92,6 +92,7 @@ async fn main() -> Result<()> {
             samples: Samples::PCM { samples: chunk_vec },
             sample_rate,
             timestamp: (processed_samples_count * 1000) / sample_rate as u64,
+            channels: 1,
         };
         processed_samples_count += frame_size as u64;
 
@@ -117,6 +118,7 @@ async fn main() -> Result<()> {
             },
             sample_rate,
             timestamp: (processed_samples_count * 1000) / sample_rate as u64,
+            channels: 1,
         };
         processed_samples_count += frame_size as u64;
         vad.process_frame(&mut frame)?;

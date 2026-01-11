@@ -25,6 +25,7 @@ use anyhow::Result;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 pub type FnCreateVadProcessor = fn(
     token: CancellationToken,
@@ -264,8 +265,10 @@ impl StreamEngine {
         let samplerate = track.config().samplerate as usize;
         Box::pin(async move {
             let mut processors = vec![];
+            debug!(track_id = %track_id, "Creating processors for track");
             match option.denoise {
                 Some(true) => {
+                    debug!(track_id = %track_id, "Adding NoiseReducer processor");
                     let noise_reducer = NoiseReducer::new(samplerate);
                     processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
                 }
@@ -273,6 +276,7 @@ impl StreamEngine {
             }
             match option.vad {
                 Some(ref option) => {
+                    debug!(track_id = %track_id, "Adding VadProcessor processor type={:?}", option.r#type);
                     let vad_processor: Box<dyn Processor + 'static> = engine.create_vad_processor(
                         cancel_token.child_token(),
                         event_sender.clone(),
@@ -284,6 +288,7 @@ impl StreamEngine {
             }
             match option.asr {
                 Some(ref option) => {
+                    debug!(track_id = %track_id, "Adding AsrProcessor processor provider={:?}", option.provider);
                     let asr_processor = engine
                         .create_asr_processor(
                             track_id.clone(),

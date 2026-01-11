@@ -211,6 +211,7 @@ async fn test_stream_forward_packets() -> Result<()> {
         timestamp: 1000,
         samples: Samples::PCM { samples: samples },
         sample_rate: 16000,
+        channels: 1,
     };
 
     // Try to send the packet - ignore errors
@@ -277,6 +278,7 @@ async fn test_stream_recorder() -> Result<()> {
         timestamp: 1000,
         samples: Samples::PCM { samples: samples1 },
         sample_rate: 16000,
+        channels: 1,
     };
 
     let packet2 = AudioFrame {
@@ -284,6 +286,7 @@ async fn test_stream_recorder() -> Result<()> {
         timestamp: 1020,
         samples: Samples::PCM { samples: samples2 },
         sample_rate: 16000,
+        channels: 1,
     };
 
     // Send the packets directly to the packet sender
@@ -337,6 +340,7 @@ async fn test_stream_forward_payload_conversion() -> Result<()> {
             sequence_number: 1,
         },
         sample_rate: 16000,
+        channels: 1,
     };
 
     // Send the RTP packet - ignore errors
@@ -350,6 +354,7 @@ async fn test_stream_forward_payload_conversion() -> Result<()> {
             samples: vec![3000, 6000, 9000, 12000],
         },
         sample_rate: 16000,
+        channels: 1,
     };
 
     // Send the PCM packet - ignore errors

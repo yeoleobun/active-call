@@ -53,7 +53,7 @@ pub fn vec_fma(out: &mut [f32], w: &[f32], x: f32) {
         };
         return;
     }
-
+    #[allow(unused)]
     for i in 0..out.len() {
         out[i] += w[i] * x;
     }

@@ -165,6 +165,7 @@ mod tests {
             },
             timestamp: 0,
             sample_rate: 16000,
+            channels: 1,
         };
 
         processor.process_frame(&mut frame).unwrap();
@@ -188,6 +189,7 @@ mod tests {
             },
             timestamp: 0,
             sample_rate: 16000,
+            channels: 1,
         };
 
         processor.process_frame(&mut frame).unwrap();

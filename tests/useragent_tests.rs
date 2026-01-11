@@ -271,3 +271,206 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
     test_result.expect("test failed");
     Ok(())
 }
+
+#[tokio::test]
+async fn test_incoming_call_reject() -> Result<()> {
+    // 1. Create webhook server to capture Alice's incoming calls
+    let webhook_requests = Arc::new(Mutex::new(Vec::<WebhookRequest>::new()));
+    let webhook_requests_clone = webhook_requests.clone();
+
+    // Create flag for accepting calls
+    let alice_dialog_id = Arc::new(Mutex::new(None::<String>));
+    let alice_dialog_id_clone = alice_dialog_id.clone();
+
+    let webhook_app = Router::new().route(
+        "/webhook",
+        post(
+            move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                let mut webhook_headers = HashMap::new();
+                for (k, v) in headers.iter() {
+                    webhook_headers.insert(k.to_string(), v.to_str().unwrap_or("").to_string());
+                }
+
+                let webhook_req = WebhookRequest {
+                    body: body.clone(),
+                    headers: webhook_headers,
+                };
+
+                // Save webhook request
+                webhook_requests_clone.lock().unwrap().push(webhook_req);
+
+                // Extract dialog_id for subsequent accept
+                if let Some(dialog_id) = body.get("dialogId") {
+                    if let Some(id_str) = dialog_id.as_str() {
+                        *alice_dialog_id_clone.lock().unwrap() = Some(id_str.to_string());
+                    }
+                }
+
+                info!("Webhook received: {:?}", body);
+                (HttpStatusCode::OK, "OK")
+            },
+        ),
+    );
+
+    // Start webhook server
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let webhook_addr = listener.local_addr()?;
+    let webhook_url = format!("http://127.0.0.1:{}/webhook", webhook_addr.port());
+
+    info!("Webhook server listening on {}", webhook_url);
+
+    tokio::spawn(async move {
+        axum::serve(listener, webhook_app).await.unwrap();
+    });
+
+    // 2. Setup Alice (Server) with Webhook
+    let alice_ua_arc = create_test_useragent(webhook_url).await?;
+    let alice_token = alice_ua_arc.token.clone();
+
+    // 3. Setup Bob (Client)
+    let bob_addr = "127.0.0.1".to_string();
+    let bob_ua_arc = create_simple_useragent(bob_addr).await?;
+    let bob_token = bob_ua_arc.token.clone();
+
+    let alice_ua_run = alice_ua_arc.clone();
+    let bob_ua_run = bob_ua_arc.clone();
+
+    let test_logic = async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 4. Bob calls Alice
+        let alice_local_addr = alice_ua_arc.endpoint.get_addrs().first().cloned().unwrap();
+        let bob_local_addr = bob_ua_arc.endpoint.get_addrs().first().cloned().unwrap();
+
+        let alice_uri = format!("sip:alice@{}", alice_local_addr.addr);
+        let bob_uri = format!("sip:bob@{}", bob_local_addr.addr);
+        
+        info!("Alice URI: {}, Bob URI: {}", alice_uri, bob_uri);
+
+        let sdp = b"v=0\r\no=bob 123456 123456 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        
+        let invite_option = InviteOption {
+            caller: bob_uri.clone().try_into()?,
+            callee: alice_uri.try_into()?,
+            content_type: Some("application/sdp".to_string()),
+            offer: Some(sdp.to_vec()),
+            contact: bob_uri.try_into()?,
+            ..Default::default()
+        };
+
+        let (state_sender, _state_receiver) = mpsc::unbounded_channel();
+        let bob_ua_invite = bob_ua_arc.invitation.clone();
+
+        let invite_handle = tokio::spawn(async move {
+            bob_ua_invite.invite(invite_option, state_sender).await
+        });
+
+        let mut webhook_received = false;
+        let mut alice_dialog_id_received = None;
+
+        for i in 0..50 {
+            if !webhook_requests.lock().unwrap().is_empty() {
+                webhook_received = true;
+                alice_dialog_id_received = alice_dialog_id.lock().unwrap().clone();
+                info!("Webhook received after {}ms", i * 100);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        if !webhook_received {
+            invite_handle.abort();
+            return Err(anyhow::anyhow!("Webhook was not called within timeout"));
+        }
+
+        if let Some(dialog_id_str) = alice_dialog_id_received {
+            if let Some(pending_call) = alice_ua_arc.invitation.get_pending_call(&dialog_id_str) {
+                info!("Alice REJECTING call with dialog_id: {}", dialog_id_str);
+                pending_call.dialog.reject(Some(rsip::StatusCode::Decline), None).ok();
+            } else {
+                 return Err(anyhow::anyhow!("No pending call found for Alice"));
+            }
+        }
+
+        match invite_handle.await {
+            Ok(Err(e)) => {
+                info!("Bob's call failed as expected: {:?}", e);
+            }
+            Ok(Ok(_)) => {
+                return Err(anyhow::anyhow!("Bob call succeeded but should have been rejected"));
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    };
+
+    let test_result = tokio::select! {
+        _ = alice_ua_run.serve() => Err(anyhow::anyhow!("Alice stopped unexpectedly")),
+        _ = bob_ua_run.serve() => Err(anyhow::anyhow!("Bob stopped unexpectedly")),
+        res = test_logic => res,
+    };
+
+    alice_token.cancel();
+    bob_token.cancel();
+    test_result
+}
+
+#[tokio::test]
+async fn test_outgoing_call_remote_reject() -> Result<()> {
+    // 1. Setup Alice
+    let alice_ua_arc = create_simple_useragent("127.0.0.1".to_string()).await?;
+    let alice_token = alice_ua_arc.token.clone();
+
+    // 2. Setup Bob (No Config -> No Handler)
+    let bob_ua_arc = create_simple_useragent("127.0.0.1".to_string()).await?;
+    let bob_token = bob_ua_arc.token.clone();
+    
+    let alice_ua_run = alice_ua_arc.clone();
+    let bob_ua_run = bob_ua_arc.clone();
+
+    let test_logic = async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let alice_local_addr = alice_ua_arc.endpoint.get_addrs().first().cloned().unwrap();
+        let bob_local_addr = bob_ua_arc.endpoint.get_addrs().first().cloned().unwrap();
+
+        let alice_uri = format!("sip:alice@{}", alice_local_addr.addr);
+        let bob_uri = format!("sip:bob@{}", bob_local_addr.addr);
+        
+        let sdp = b"v=0\r\no=alice 111 111 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 50000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+
+        let invite_option = InviteOption {
+            caller: alice_uri.clone().try_into()?,
+            callee: bob_uri.try_into()?,
+            content_type: Some("application/sdp".to_string()),
+            offer: Some(sdp.to_vec()),
+            contact: alice_uri.try_into()?,
+            ..Default::default()
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = alice_ua_arc.invitation.invite(invite_option, tx).await;
+
+        match result {
+            Ok(_) => {
+                Err(anyhow::anyhow!("Outgoing call should have been rejected by Bob who has no handler"))
+            }
+            Err(e) => {
+                info!("Outgoing call rejected as expected: {:?}", e);
+                Ok(())
+            }
+        }
+    };
+    
+    let test_result = tokio::select! {
+        _ = alice_ua_run.serve() => Err(anyhow::anyhow!("Alice stopped unexpectedly")),
+        _ = bob_ua_run.serve() => Err(anyhow::anyhow!("Bob stopped unexpectedly")),
+        res = test_logic => res,
+    };
+
+    alice_token.cancel();
+    bob_token.cancel();
+    test_result
+}

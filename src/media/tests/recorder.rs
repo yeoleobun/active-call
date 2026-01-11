@@ -65,6 +65,7 @@ async fn test_recorder() -> Result<()> {
             },
             timestamp: (i * 100), // Increment timestamp by 100ms
             sample_rate: 16000,
+            channels: 1,
         };
 
         let right_frame = AudioFrame {
@@ -74,6 +75,7 @@ async fn test_recorder() -> Result<()> {
             },
             timestamp: (i * 100), // Same timestamp for synchronized channels
             sample_rate: 16000,
+            channels: 1,
         };
 
         // Send frames
@@ -151,6 +153,7 @@ async fn test_recorder_intermittent_data() -> Result<()> {
             },
             timestamp: (i * 50) as u64,
             sample_rate: 16000,
+            channels: 1,
         };
 
         tx.send(frame)?;
@@ -170,6 +173,7 @@ async fn test_recorder_intermittent_data() -> Result<()> {
         },
         timestamp: 1000,
         sample_rate: 16000,
+        channels: 1,
     };
     tx.send(clipped_frame)?;
 
@@ -182,6 +186,7 @@ async fn test_recorder_intermittent_data() -> Result<()> {
         },
         timestamp: 1100,
         sample_rate: 16000,
+        channels: 1,
     };
     tx.send(constant_frame)?;
 
@@ -232,6 +237,7 @@ async fn test_constant_value_detection() -> Result<()> {
         },
         timestamp: 0,
         sample_rate: 16000,
+        channels: 1,
     };
     tx.send(frame1)?;
 
@@ -244,6 +250,7 @@ async fn test_constant_value_detection() -> Result<()> {
         },
         timestamp: 100,
         sample_rate: 16000,
+        channels: 1,
     };
     tx.send(frame2)?;
 
@@ -256,6 +263,7 @@ async fn test_constant_value_detection() -> Result<()> {
         },
         timestamp: 200,
         sample_rate: 16000,
+        channels: 1,
     };
     tx.send(frame3)?;
 
@@ -268,6 +276,7 @@ async fn test_constant_value_detection() -> Result<()> {
         },
         timestamp: 300,
         sample_rate: 16000,
+        channels: 1,
     };
     tx.send(frame4)?;
 
@@ -282,6 +291,7 @@ async fn test_constant_value_detection() -> Result<()> {
         },
         timestamp: 400,
         sample_rate: 16000,
+        channels: 1,
     };
     tx.send(frame5)?;
 
@@ -350,6 +360,7 @@ async fn test_recorder_200ms_timing() -> Result<()> {
             samples: Samples::PCM { samples: samples_1 },
             timestamp: (i * 200) as u64, // 200ms intervals
             sample_rate: 16000,
+            channels: 1,
         };
 
         let frame_2 = AudioFrame {
@@ -357,6 +368,7 @@ async fn test_recorder_200ms_timing() -> Result<()> {
             samples: Samples::PCM { samples: samples_2 },
             timestamp: (i * 200) as u64,
             sample_rate: 16000,
+            channels: 1,
         };
 
         tx.send(frame_1)?;

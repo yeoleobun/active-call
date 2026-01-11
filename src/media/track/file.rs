@@ -75,6 +75,7 @@ trait AudioReader: Send {
     fn set_position(&mut self, pos: usize);
     fn sample_rate(&self) -> u32;
     fn target_sample_rate(&self) -> u32;
+    fn channels(&self) -> u16;
     fn extract_chunk(&self, start: usize, end: usize) -> Vec<i16>;
     fn resample_chunk(&mut self, chunk: &[i16]) -> Vec<i16>;
 }
@@ -215,6 +216,10 @@ impl AudioReader for WavAudioReader {
         self.target_sample_rate
     }
 
+    fn channels(&self) -> u16 {
+        1
+    }
+
     fn extract_chunk(&self, start: usize, end: usize) -> Vec<i16> {
         self.buffer[start..end].to_vec()
     }
@@ -317,6 +322,10 @@ impl AudioReader for Mp3AudioReader {
         self.target_sample_rate
     }
 
+    fn channels(&self) -> u16 {
+        1
+    }
+
     fn extract_chunk(&self, start: usize, end: usize) -> Vec<i16> {
         self.buffer[start..end].to_vec()
     }
@@ -356,12 +365,14 @@ async fn process_audio_reader(
     let stream_loop = async move {
         let start_time = Instant::now();
         let mut ticker = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
+        let channels = audio_reader.channels();
         while let Some((chunk, chunk_sample_rate)) = audio_reader.read_chunk(packet_duration_ms)? {
             let mut packet = AudioFrame {
                 track_id: track_id.to_string(),
                 timestamp: crate::media::get_timestamp(),
                 samples: Samples::PCM { samples: chunk },
                 sample_rate: chunk_sample_rate,
+                channels,
             };
 
             match processor_chain.process_frame(&mut packet) {

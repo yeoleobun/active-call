@@ -1,12 +1,22 @@
-use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
-use tokio::fs;
 use crate::EouOption;
 use crate::media::recorder::RecorderOption;
 use crate::media::vad::VADOption;
 use crate::synthesis::SynthesisOption;
 use crate::transcription::TranscriptionOption;
+use anyhow::{Result, anyhow};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, path::Path};
+use tokio::fs;
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum InterruptionStrategy {
+    #[default]
+    Both,
+    Vad,
+    Asr,
+    None,
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +29,8 @@ pub struct PlaybookConfig {
     pub recorder: Option<RecorderOption>,
     pub extra: Option<HashMap<String, String>>,
     pub eou: Option<EouOption>,
+    pub greeting: Option<String>,
+    pub interruption: Option<InterruptionStrategy>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]

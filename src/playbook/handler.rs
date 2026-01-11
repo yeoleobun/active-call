@@ -1,14 +1,24 @@
+use crate::ReferOption;
 use crate::call::Command;
+use crate::event::SessionEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use futures::{Stream, StreamExt};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{info, warn};
-use crate::ReferOption;
-use crate::event::SessionEvent;
 
+static RE_HANGUP: Lazy<Regex> = Lazy::new(|| Regex::new(r"<hangup\s*/>").unwrap());
+static RE_REFER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"<refer\s+to="([^"]+)"\s*/>"#).unwrap());
+static RE_SENTENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)[.!?。！？\n]\s*").unwrap());
+
+use super::InterruptionStrategy;
 use super::LlmConfig;
 use super::dialogue::DialogueHandler;
 
@@ -23,6 +33,11 @@ const MAX_RAG_ATTEMPTS: usize = 3;
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn call(&self, config: &LlmConfig, history: &[ChatMessage]) -> Result<String>;
+    async fn call_stream(
+        &self,
+        config: &LlmConfig,
+        history: &[ChatMessage],
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>>;
 }
 
 struct DefaultLlmProvider {
@@ -79,6 +94,76 @@ impl LlmProvider for DefaultLlmProvider {
 
         Ok(content)
     }
+
+    async fn call_stream(
+        &self,
+        config: &LlmConfig,
+        history: &[ChatMessage],
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        let mut url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
+        let model = config
+            .model
+            .clone()
+            .unwrap_or_else(|| "gpt-3.5-turbo".to_string());
+        let api_key = config.api_key.clone().unwrap_or_default();
+
+        if !url.ends_with("/chat/completions") {
+            url = format!("{}/chat/completions", url.trim_end_matches('/'));
+        }
+
+        let body = json!({
+            "model": model,
+            "messages": history,
+            "stream": true,
+        });
+
+        let res = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            return Err(anyhow!("LLM request failed: {}", res.status()));
+        }
+
+        let stream = res.bytes_stream();
+        let s = async_stream::stream! {
+            let mut buffer = String::new();
+            for await chunk in stream {
+                match chunk {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        buffer.push_str(&text);
+
+                        while let Some(line_end) = buffer.find('\n') {
+                            let line = buffer[..line_end].trim();
+                            if line.starts_with("data:") {
+                                let data = &line[5..].trim();
+                                if *data == "[DONE]" {
+                                    break;
+                                }
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                        yield Ok(content.to_string());
+                                    }
+                                }
+                            }
+                            buffer.drain(..=line_end);
+                        }
+                    }
+                    Err(e) => yield Err(anyhow!(e)),
+                }
+            }
+        };
+
+        Ok(Box::pin(s))
+    }
 }
 
 #[async_trait]
@@ -122,38 +207,59 @@ enum ToolInvocation {
         query: String,
         source: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    Accept { options: Option<crate::CallOption> },
+    #[serde(rename_all = "camelCase")]
+    Reject {
+        reason: Option<String>,
+        code: Option<u32>,
+    },
 }
 
 pub struct LlmHandler {
     config: LlmConfig,
     history: Vec<ChatMessage>,
-    provider: Box<dyn LlmProvider>,
+    provider: Arc<dyn LlmProvider>,
     rag_retriever: Arc<dyn RagRetriever>,
     is_speaking: bool,
     event_sender: Option<crate::event::EventSender>,
+    last_asr_final_at: Option<std::time::Instant>,
+    interruption: InterruptionStrategy,
+    call: Option<crate::call::ActiveCallRef>,
 }
 
 impl LlmHandler {
-    pub fn new(config: LlmConfig) -> Self {
+    pub fn new(config: LlmConfig, interruption: InterruptionStrategy) -> Self {
         Self::with_provider(
             config,
-            Box::new(DefaultLlmProvider::new()),
+            Arc::new(DefaultLlmProvider::new()),
             Arc::new(NoopRagRetriever),
+            interruption,
         )
     }
 
     pub fn with_provider(
         config: LlmConfig,
-        provider: Box<dyn LlmProvider>,
+        provider: Arc<dyn LlmProvider>,
         rag_retriever: Arc<dyn RagRetriever>,
+        interruption: InterruptionStrategy,
     ) -> Self {
         let mut history = Vec::new();
-        if let Some(prompt) = &config.prompt {
-            history.push(ChatMessage {
-                role: "system".to_string(),
-                content: prompt.clone(),
-            });
-        }
+        let prompt = config.prompt.clone().unwrap_or_default();
+        let system_prompt = format!(
+            "{}\n\n\
+            Tool usage instructions:\n\
+            - To hang up the call, use: <hangup/>\n\
+            - To transfer the call, use: <refer to=\"sip:xxxx\"/>\n\
+            Use these XML-like tags instead of JSON. Efficiency is key. \
+            Output your response in short sentences. Each sentence will be played as soon as it is finished.",
+            prompt
+        );
+
+        history.push(ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt,
+        });
 
         Self {
             config,
@@ -162,7 +268,14 @@ impl LlmHandler {
             rag_retriever,
             is_speaking: false,
             event_sender: None,
+            last_asr_final_at: None,
+            interruption,
+            call: None,
         }
+    }
+
+    pub fn set_call(&mut self, call: crate::call::ActiveCallRef) {
+        self.call = Some(call);
     }
 
     pub fn set_event_sender(&mut self, sender: crate::event::EventSender) {
@@ -185,13 +298,18 @@ impl LlmHandler {
         self.provider.call(&self.config, &self.history).await
     }
 
-    fn create_tts_command(&self, text: String, wait_input_timeout: Option<u32>) -> Command {
+    fn create_tts_command(
+        &self,
+        text: String,
+        wait_input_timeout: Option<u32>,
+        auto_hangup: Option<bool>,
+    ) -> Command {
         let timeout = wait_input_timeout.unwrap_or(10000);
         Command::Tts {
             text,
             speaker: None,
-            play_id: None,
-            auto_hangup: None,
+            play_id: Some(uuid::Uuid::new_v4().to_string()),
+            auto_hangup,
             streaming: None,
             end_of_stream: None,
             option: None,
@@ -202,18 +320,208 @@ impl LlmHandler {
 
     async fn generate_response(&mut self) -> Result<Vec<Command>> {
         // Send debug event - LLM call started
-        self.send_debug_event("llm_call_start", json!({
-            "history_length": self.history.len(),
-        }));
+        self.send_debug_event(
+            "llm_call_start",
+            json!({
+                "history_length": self.history.len(),
+            }),
+        );
 
-        let initial = self.call_llm().await?;
+        let play_id = uuid::Uuid::new_v4().to_string();
+        let mut stream = self.provider.call_stream(&self.config, &self.history).await?;
+
+        let mut full_content = String::new();
+        let mut buffer = String::new();
+        let mut commands = Vec::new();
+        let mut is_json_mode = false;
+        let mut checked_json_mode = false;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("LLM stream error: {}", e);
+                    break;
+                }
+            };
+
+            full_content.push_str(&chunk);
+            buffer.push_str(&chunk);
+
+            if !checked_json_mode {
+                let trimmed = full_content.trim();
+                if !trimmed.is_empty() {
+                    if trimmed.starts_with('{') || trimmed.starts_with('`') {
+                        is_json_mode = true;
+                    }
+                    checked_json_mode = true;
+                }
+            }
+
+            if checked_json_mode && !is_json_mode {
+                let extracted = self.extract_streaming_commands(&mut buffer, &play_id, false);
+                for cmd in extracted {
+                    if let Some(call) = &self.call {
+                        let _ = call.enqueue_command(cmd).await;
+                    } else {
+                        commands.push(cmd);
+                    }
+                }
+            }
+        }
 
         // Send debug event - LLM response received
-        self.send_debug_event("llm_response", json!({
-            "response": initial,
-        }));
+        self.send_debug_event(
+            "llm_response",
+            json!({
+                "response": full_content,
+                "is_json_mode": is_json_mode,
+            }),
+        );
 
-        self.interpret_response(initial).await
+        if is_json_mode {
+            self.interpret_response(full_content).await
+        } else {
+            let extracted = self.extract_streaming_commands(&mut buffer, &play_id, true);
+            for cmd in extracted {
+                if let Some(call) = &self.call {
+                    let _ = call.enqueue_command(cmd).await;
+                } else {
+                    commands.push(cmd);
+                }
+            }
+            if !full_content.trim().is_empty() {
+                self.history.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: full_content,
+                });
+                self.is_speaking = true;
+            }
+            Ok(commands)
+        }
+    }
+
+    fn extract_streaming_commands(
+        &self,
+        buffer: &mut String,
+        play_id: &str,
+        is_final: bool,
+    ) -> Vec<Command> {
+        let mut commands = Vec::new();
+
+        loop {
+            let hangup_pos = RE_HANGUP.find(buffer);
+            let refer_pos = RE_REFER.captures(buffer);
+            let sentence_pos = RE_SENTENCE.find(buffer);
+
+            // Find the first occurrence
+            let mut positions = Vec::new();
+            if let Some(m) = hangup_pos {
+                positions.push((m.start(), 0));
+            }
+            if let Some(caps) = &refer_pos {
+                positions.push((caps.get(0).unwrap().start(), 1));
+            }
+            if let Some(m) = sentence_pos {
+                positions.push((m.start(), 2));
+            }
+
+            positions.sort_by_key(|p| p.0);
+
+            if let Some((pos, kind)) = positions.first() {
+                let pos = *pos;
+                match kind {
+                    0 => {
+                        // Hangup
+                        let prefix = buffer[..pos].to_string();
+                        if !prefix.trim().is_empty() {
+                            commands.push(self.create_tts_command_with_id(
+                                prefix,
+                                play_id.to_string(),
+                                None,
+                            ));
+                        }
+                        commands.push(Command::Hangup {
+                            reason: None,
+                            initiator: None,
+                        });
+                        buffer.drain(..RE_HANGUP.find(buffer).unwrap().end());
+                        // Stop after hangup
+                        return commands;
+                    }
+                    1 => {
+                        // Refer
+                        let caps = RE_REFER.captures(buffer).unwrap();
+                        let mat = caps.get(0).unwrap();
+                        let callee = caps.get(1).unwrap().as_str().to_string();
+
+                        let prefix = buffer[..pos].to_string();
+                        if !prefix.trim().is_empty() {
+                            commands.push(self.create_tts_command_with_id(
+                                prefix,
+                                play_id.to_string(),
+                                None,
+                            ));
+                        }
+                        commands.push(Command::Refer {
+                            caller: String::new(),
+                            callee,
+                            options: None,
+                        });
+                        buffer.drain(..mat.end());
+                    }
+                    2 => {
+                        // Sentence
+                        let mat = sentence_pos.unwrap();
+                        let sentence = buffer[..mat.end()].to_string();
+                        if !sentence.trim().is_empty() {
+                            commands.push(self.create_tts_command_with_id(
+                                sentence,
+                                play_id.to_string(),
+                                None,
+                            ));
+                        }
+                        buffer.drain(..mat.end());
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                break;
+            }
+        }
+
+        if is_final {
+            let remaining = buffer.trim().to_string();
+            if !remaining.is_empty() {
+                commands.push(self.create_tts_command_with_id(
+                    remaining,
+                    play_id.to_string(),
+                    None,
+                ));
+            }
+            buffer.clear();
+        }
+
+        commands
+    }
+
+    fn create_tts_command_with_id(
+        &self,
+        text: String,
+        play_id: String,
+        auto_hangup: Option<bool>,
+    ) -> Command {
+        Command::Tts {
+            text,
+            speaker: None,
+            play_id: Some(play_id),
+            auto_hangup,
+            streaming: Some(true),
+            end_of_stream: None,
+            option: None,
+            wait_input_timeout: Some(10000),
+            base64: None,
+        }
     }
 
     async fn interpret_response(&mut self, initial: String) -> Result<Vec<Command>> {
@@ -235,18 +543,24 @@ impl LlmHandler {
                 if let Some(tools) = structured.tools {
                     for tool in tools {
                         match tool {
-                            ToolInvocation::Hangup { ref reason, ref initiator } => {
+                            ToolInvocation::Hangup {
+                                ref reason,
+                                ref initiator,
+                            } => {
                                 // Send debug event
-                                self.send_debug_event("tool_invocation", json!({
-                                    "tool": "Hangup",
-                                    "params": {
-                                        "reason": reason,
-                                        "initiator": initiator,
-                                    }
-                                }));
+                                self.send_debug_event(
+                                    "tool_invocation",
+                                    json!({
+                                        "tool": "Hangup",
+                                        "params": {
+                                            "reason": reason,
+                                            "initiator": initiator,
+                                        }
+                                    }),
+                                );
                                 tool_commands.push(Command::Hangup {
                                     reason: reason.clone(),
-                                    initiator: initiator.clone()
+                                    initiator: initiator.clone(),
                                 });
                             }
                             ToolInvocation::Refer {
@@ -255,36 +569,48 @@ impl LlmHandler {
                                 ref options,
                             } => {
                                 // Send debug event
-                                self.send_debug_event("tool_invocation", json!({
-                                    "tool": "Refer",
-                                    "params": {
-                                        "caller": caller,
-                                        "callee": callee,
-                                    }
-                                }));
+                                self.send_debug_event(
+                                    "tool_invocation",
+                                    json!({
+                                        "tool": "Refer",
+                                        "params": {
+                                            "caller": caller,
+                                            "callee": callee,
+                                        }
+                                    }),
+                                );
                                 tool_commands.push(Command::Refer {
                                     caller: caller.clone(),
                                     callee: callee.clone(),
                                     options: options.clone(),
                                 });
                             }
-                            ToolInvocation::Rag { ref query, ref source } => {
+                            ToolInvocation::Rag {
+                                ref query,
+                                ref source,
+                            } => {
                                 // Send debug event - RAG query started
-                                self.send_debug_event("tool_invocation", json!({
-                                    "tool": "Rag",
-                                    "params": {
-                                        "query": query,
-                                        "source": source,
-                                    }
-                                }));
+                                self.send_debug_event(
+                                    "tool_invocation",
+                                    json!({
+                                        "tool": "Rag",
+                                        "params": {
+                                            "query": query,
+                                            "source": source,
+                                        }
+                                    }),
+                                );
 
                                 let rag_result = self.rag_retriever.retrieve(&query).await?;
 
                                 // Send debug event - RAG result
-                                self.send_debug_event("rag_result", json!({
-                                    "query": query,
-                                    "result": rag_result,
-                                }));
+                                self.send_debug_event(
+                                    "rag_result",
+                                    json!({
+                                        "query": query,
+                                        "result": rag_result,
+                                    }),
+                                );
 
                                 let summary = if let Some(source) = source {
                                     format!("[{}] {}", source, rag_result)
@@ -296,6 +622,35 @@ impl LlmHandler {
                                     content: format!("RAG result for {}: {}", query, summary),
                                 });
                                 rerun_for_rag = true;
+                            }
+                            ToolInvocation::Accept { ref options } => {
+                                self.send_debug_event(
+                                    "tool_invocation",
+                                    json!({
+                                        "tool": "Accept",
+                                    }),
+                                );
+                                tool_commands.push(Command::Accept {
+                                    option: options.clone().unwrap_or_default(),
+                                });
+                            }
+                            ToolInvocation::Reject { ref reason, code } => {
+                                self.send_debug_event(
+                                    "tool_invocation",
+                                    json!({
+                                        "tool": "Reject",
+                                        "params": {
+                                            "reason": reason,
+                                            "code": code,
+                                        }
+                                    }),
+                                );
+                                tool_commands.push(Command::Reject {
+                                    reason: reason
+                                        .clone()
+                                        .unwrap_or_else(|| "Rejected by agent".to_string()),
+                                    code,
+                                });
                             }
                         }
                     }
@@ -311,7 +666,7 @@ impl LlmHandler {
                     continue;
                 }
 
-                final_text = Some(structured.text.unwrap_or_else(|| raw.clone()));
+                final_text = structured.text;
                 break;
             }
 
@@ -320,6 +675,16 @@ impl LlmHandler {
         }
 
         let mut commands = Vec::new();
+
+        // Check if any tool invocation is a hangup
+        let mut has_hangup = false;
+        for tool in &tool_commands {
+            if matches!(tool, Command::Hangup { .. }) {
+                has_hangup = true;
+                break;
+            }
+        }
+
         if let Some(text) = final_text {
             if !text.trim().is_empty() {
                 self.history.push(ChatMessage {
@@ -327,7 +692,15 @@ impl LlmHandler {
                     content: text.clone(),
                 });
                 self.is_speaking = true;
-                commands.push(self.create_tts_command(text, wait_input_timeout));
+
+                // If we have text and a hangup command, use auto_hangup on the TTS command
+                // and remove the separate hangup command.
+                if has_hangup {
+                    commands.push(self.create_tts_command(text, wait_input_timeout, Some(true)));
+                    tool_commands.retain(|c| !matches!(c, Command::Hangup { .. }));
+                } else {
+                    commands.push(self.create_tts_command(text, wait_input_timeout, None));
+                }
             }
         }
 
@@ -373,7 +746,7 @@ impl DialogueHandler for LlmHandler {
     async fn on_start(&mut self) -> Result<Vec<Command>> {
         if let Some(greeting) = &self.config.greeting {
             self.is_speaking = true;
-            return Ok(vec![self.create_tts_command(greeting.clone(), None)]);
+            return Ok(vec![self.create_tts_command(greeting.clone(), None, None)]);
         }
 
         self.generate_response().await
@@ -386,6 +759,9 @@ impl DialogueHandler for LlmHandler {
                     return Ok(vec![]);
                 }
 
+                self.last_asr_final_at = Some(std::time::Instant::now());
+                self.is_speaking = false;
+
                 self.history.push(ChatMessage {
                     role: "user".to_string(),
                     content: text.clone(),
@@ -395,7 +771,24 @@ impl DialogueHandler for LlmHandler {
             }
 
             SessionEvent::AsrDelta { .. } | SessionEvent::Speaking { .. } => {
-                if self.is_speaking {
+                let should_interrupt = match (self.interruption, event) {
+                    (InterruptionStrategy::None, _) => false,
+                    (InterruptionStrategy::Vad, SessionEvent::Speaking { .. }) => true,
+                    (InterruptionStrategy::Asr, SessionEvent::AsrDelta { .. }) => true,
+                    (InterruptionStrategy::Both, _) => true,
+                    _ => false,
+                };
+
+                if self.is_speaking && should_interrupt {
+                    // Ignore interruptions that occur very shortly after the last ASR final.
+                    // This prevents stale VAD events from cancelling the newly generated response.
+                    if let Some(last_final) = self.last_asr_final_at {
+                        if last_final.elapsed().as_millis() < 800 {
+                            tracing::debug!("Ignoring interruption event too close to AsrFinal");
+                            return Ok(vec![]);
+                        }
+                    }
+
                     info!("Interruption detected, stopping playback");
                     self.is_speaking = false;
                     return Ok(vec![Command::Interrupt {
@@ -423,11 +816,11 @@ impl DialogueHandler for LlmHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::SessionEvent;
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use std::collections::VecDeque;
     use std::sync::Mutex;
-    use crate::event::SessionEvent;
 
     struct TestProvider {
         responses: Mutex<VecDeque<String>>,
@@ -448,6 +841,18 @@ mod tests {
             guard
                 .pop_front()
                 .ok_or_else(|| anyhow!("Test provider ran out of responses"))
+        }
+
+        async fn call_stream(
+            &self,
+            _config: &LlmConfig,
+            _history: &[ChatMessage],
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+            let response = self.call(_config, _history).await?;
+            let s = async_stream::stream! {
+                yield Ok(response);
+            };
+            Ok(Box::pin(s))
         }
     }
 
@@ -486,9 +891,13 @@ mod tests {
             ]
         }"#;
 
-        let provider = Box::new(TestProvider::new(vec![response.to_string()]));
-        let mut handler =
-            LlmHandler::with_provider(LlmConfig::default(), provider, Arc::new(NoopRagRetriever));
+        let provider = Arc::new(TestProvider::new(vec![response.to_string()]));
+        let mut handler = LlmHandler::with_provider(
+            LlmConfig::default(),
+            provider,
+            Arc::new(NoopRagRetriever),
+            InterruptionStrategy::Both,
+        );
 
         let event = SessionEvent::AsrFinal {
             track_id: "track-1".to_string(),
@@ -505,16 +914,10 @@ mod tests {
             Some(Command::Tts {
                 text,
                 wait_input_timeout: Some(15000),
+                auto_hangup: Some(true),
                 ..
             }) if text == "Goodbye"
         ));
-        assert!(commands.iter().any(|cmd| matches!(
-            cmd,
-            Command::Hangup {
-                reason: Some(reason),
-                initiator: Some(origin),
-            } if reason == "done" && origin == "agent"
-        )));
         assert!(commands.iter().any(|cmd| matches!(
             cmd,
             Command::Refer {
@@ -530,12 +933,17 @@ mod tests {
     #[tokio::test]
     async fn handler_requeries_after_rag() -> Result<()> {
         let rag_instruction = r#"{"tools": [{"name": "rag", "query": "policy"}]}"#;
-        let provider = Box::new(TestProvider::new(vec![
+        let provider = Arc::new(TestProvider::new(vec![
             rag_instruction.to_string(),
             "Final answer".to_string(),
         ]));
         let rag = Arc::new(RecordingRag::new());
-        let mut handler = LlmHandler::with_provider(LlmConfig::default(), provider, rag.clone());
+        let mut handler = LlmHandler::with_provider(
+            LlmConfig::default(),
+            provider,
+            rag.clone(),
+            InterruptionStrategy::Both,
+        );
 
         let event = SessionEvent::AsrFinal {
             track_id: "track-2".to_string(),
@@ -570,13 +978,18 @@ mod tests {
                 .to_string(),
         ];
 
-        let provider = Box::new(TestProvider::new(responses));
+        let provider = Arc::new(TestProvider::new(responses));
         let config = LlmConfig {
             greeting: Some("Welcome to the voice assistant.".to_string()),
             ..Default::default()
         };
 
-        let mut handler = LlmHandler::with_provider(config, provider, Arc::new(NoopRagRetriever));
+        let mut handler = LlmHandler::with_provider(
+            config,
+            provider,
+            Arc::new(NoopRagRetriever),
+            InterruptionStrategy::Both,
+        );
 
         // 1. Start the dialogue
         let commands = handler.on_start().await?;
@@ -597,9 +1010,10 @@ mod tests {
             text: "I need help".to_string(),
         };
         let commands = handler.on_event(&event).await?;
-        assert_eq!(commands.len(), 1);
+        // "Hello! How can I help you today?" -> split into two
+        assert_eq!(commands.len(), 2);
         if let Command::Tts { text, .. } = &commands[0] {
-            assert_eq!(text, "Hello! How can I help you today?");
+            assert!(text.contains("Hello"));
         } else {
             panic!("Expected Tts command");
         }
@@ -637,25 +1051,102 @@ mod tests {
             text: "That's all, thanks".to_string(),
         };
         let commands = handler.on_event(&event).await?;
-        // Should have Tts and Hangup
-        assert_eq!(commands.len(), 2);
+        // Should have Tts with auto_hangup
+        assert_eq!(commands.len(), 1);
 
-        let has_tts = commands
-            .iter()
-            .any(|c| matches!(c, Command::Tts { text, .. } if text == "Goodbye!"));
-        let has_hangup = commands.iter().any(|c| matches!(c, Command::Hangup { .. }));
+        let has_tts_hangup = commands.iter().any(|c| {
+            matches!(
+                c,
+                Command::Tts {
+                    text,
+                    auto_hangup: Some(true),
+                    ..
+                } if text == "Goodbye!"
+            )
+        });
 
-        assert!(has_tts);
-        assert!(has_hangup);
+        assert!(has_tts_hangup);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_xml_tools_and_sentence_splitting() -> Result<()> {
+        let responses = vec!["Hello! <refer to=\"sip:123\"/> How are you? <hangup/>".to_string()];
+        let provider = Arc::new(TestProvider::new(responses));
+        let mut handler = LlmHandler::with_provider(
+            LlmConfig::default(),
+            provider,
+            Arc::new(NoopRagRetriever),
+            InterruptionStrategy::Both,
+        );
+
+        let event = SessionEvent::AsrFinal {
+            track_id: "test".to_string(),
+            timestamp: 0,
+            index: 0,
+            start_time: None,
+            end_time: None,
+            text: "hi".to_string(),
+        };
+
+        let commands = handler.on_event(&event).await?;
+
+        // Expected commands:
+        // 1. TTS "Hello! "
+        // 2. Refer "sip:123"
+        // 3. TTS " How are you? "
+        // 4. Hangup
+        assert_eq!(commands.len(), 4);
+
+        if let Command::Tts {
+            text,
+            play_id: pid1,
+            ..
+        } = &commands[0]
+        {
+            assert!(text.contains("Hello"));
+            assert!(pid1.is_some());
+
+            if let Command::Refer { callee, .. } = &commands[1] {
+                assert_eq!(callee, "sip:123");
+            } else {
+                panic!("Expected Refer");
+            }
+
+            if let Command::Tts {
+                text,
+                play_id: pid2,
+                ..
+            } = &commands[2]
+            {
+                assert!(text.contains("How are you"));
+                assert_eq!(*pid1, *pid2); // Same play_id
+            } else {
+                panic!("Expected Tts");
+            }
+
+            if let Command::Hangup { .. } = &commands[3] {
+                // Ok
+            } else {
+                panic!("Expected Hangup");
+            }
+        } else {
+            panic!("Expected Tts");
+        }
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_interruption_logic() -> Result<()> {
-        let provider = Box::new(TestProvider::new(vec!["Some long response".to_string()]));
-        let mut handler =
-            LlmHandler::with_provider(LlmConfig::default(), provider, Arc::new(NoopRagRetriever));
+        let provider = Arc::new(TestProvider::new(vec!["Some long response".to_string()]));
+        let mut handler = LlmHandler::with_provider(
+            LlmConfig::default(),
+            provider,
+            Arc::new(NoopRagRetriever),
+            InterruptionStrategy::Both,
+        );
 
         // 1. Trigger a response
         let event = SessionEvent::AsrFinal {
@@ -668,6 +1159,9 @@ mod tests {
         };
         handler.on_event(&event).await?;
         assert!(handler.is_speaking);
+
+        // Sleep to bypass the 800ms interruption guard
+        tokio::time::sleep(std::time::Duration::from_millis(850)).await;
 
         // 2. Simulate user starting to speak (AsrDelta)
         let event = SessionEvent::AsrDelta {
@@ -690,7 +1184,7 @@ mod tests {
     async fn test_rag_iteration_limit() -> Result<()> {
         // Provider that always returns a RAG tool call
         let rag_instruction = r#"{"tools": [{"name": "rag", "query": "endless"}]}"#;
-        let provider = Box::new(TestProvider::new(vec![
+        let provider = Arc::new(TestProvider::new(vec![
             rag_instruction.to_string(),
             rag_instruction.to_string(),
             rag_instruction.to_string(),
@@ -702,6 +1196,7 @@ mod tests {
             LlmConfig::default(),
             provider,
             Arc::new(RecordingRag::new()),
+            InterruptionStrategy::Both,
         );
 
         let event = SessionEvent::AsrFinal {

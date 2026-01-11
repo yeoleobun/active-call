@@ -166,6 +166,8 @@ impl Track for MediaPassTrack {
         let cancel_token = self.cancel_token.clone();
         let ptime = self.config.ptime;
         let ptime_ms = ptime.as_millis() as u32;
+        let channels = self.config.channels;
+        let processor_chain = self.processor_chain.clone();
         tokio::spawn(async move {
             let mut bytes_received = 0u64;
             let mut bytes_emitted = 0u64;
@@ -210,12 +212,17 @@ impl Track for MediaPassTrack {
 
                         // Create frame (will have zeros if not enough data)
                         let samples_vec = bytes_to_samples(&samples[..]);
-                        let frame = AudioFrame {
+                        let mut frame = AudioFrame {
                             track_id: track_id.clone(),
                             samples: Samples::PCM { samples: samples_vec.clone() },
                             timestamp: crate::media::get_timestamp(),
                             sample_rate: input_sample_rate,
+                            channels,
                         };
+
+                        if let Err(e) = processor_chain.process_frame(&mut frame) {
+                            warn!(track_id, "error processing frame: {}", e);
+                        }
 
                         if let Ok(_) = packet_sender.send(frame) {
                             // only count the actual bytes filled from buffer
@@ -239,12 +246,17 @@ impl Track for MediaPassTrack {
                                 } else {
                                     // send immediately if ptime was not set
                                     let samples_vec = bytes_to_samples(&data);
-                                    let frame = AudioFrame {
+                                    let mut frame = AudioFrame {
                                         track_id: track_id.clone(),
                                         samples: Samples::PCM { samples: samples_vec.clone() },
                                         timestamp: crate::media::get_timestamp(),
                                         sample_rate: input_sample_rate,
+                                        channels,
                                     };
+
+                                    if let Err(e) = processor_chain.process_frame(&mut frame) {
+                                        warn!(track_id, "error processing frame: {}", e);
+                                    }
 
                                     if let Ok(_) = packet_sender.send(frame) {
                                         bytes_emitted += data.len() as u64;
@@ -341,6 +353,11 @@ impl Track for MediaPassTrack {
     }
 
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
+        let mut packet = packet.clone();
+        if let Err(e) = self.processor_chain.clone().process_frame(&mut packet) {
+            warn!(track_id=%self.track_id, "processor_chain process_frame error: {:?}", e);
+        }
+
         if let Some(ws_sink) = self.ws_sink.lock().await.as_mut() {
             if let Samples::PCM { samples } = &packet.samples {
                 let mut buffer = self.buffer.lock().await;

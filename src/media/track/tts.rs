@@ -249,6 +249,7 @@ impl TtsTask {
                         samples,
                         timestamp: crate::media::get_timestamp(),
                         sample_rate,
+                        channels: 1,
                     };
 
                     if let Err(e) = self.processor_chain.process_frame(&mut frame) {

@@ -12,9 +12,8 @@ use crate::{
             Track, TrackConfig,
             file::FileTrack,
             media_pass::MediaPassTrack,
-            rtp::{RtpTrack, RtpTrackBuilder},
+            rtc::{RtcTrack, RtcTrackConfig},
             tts::SynthesisHandle,
-            webrtc::WebrtcTrack,
             websocket::{WebsocketBytesReceiver, WebsocketTrack},
         },
     },
@@ -30,7 +29,6 @@ use crate::{
     useragent::invitation::PendingDialog,
 };
 use anyhow::Result;
-use audio_codec::CodecType;
 use chrono::{DateTime, Utc};
 use rsipstack::dialog::{invitation::InviteOption, server_dialog::ServerInviteDialog};
 use serde::{Deserialize, Serialize};
@@ -793,6 +791,19 @@ impl ActiveCall {
         }
         *self.wait_input_timeout.lock().await = wait_input_timeout;
 
+        let should_interrupt = {
+            let mut current_id = self.current_play_id.lock().await;
+            let changed = play_id.is_some() && *current_id != play_id;
+            if changed {
+                *current_id = play_id.clone();
+            }
+            changed
+        };
+
+        if should_interrupt {
+            let _ = self.do_interrupt(false).await;
+        }
+
         if let Some(tts_handle) = self.tts_handle.lock().await.as_ref() {
             match tts_handle.try_send(play_command) {
                 Ok(_) => return Ok(()),
@@ -1189,48 +1200,33 @@ impl ActiveCall {
 }
 
 impl ActiveCall {
-    pub async fn create_rtp_track(&self, track_id: TrackId, ssrc: u32) -> Result<RtpTrack> {
-        let mut rtp_track = RtpTrackBuilder::new(track_id, self.track_config.clone())
-            .with_ssrc(ssrc)
-            .with_cancel_token(self.cancel_token.child_token());
-
-        if let Some(rtp_start_port) = self.app_state.config.rtp_start_port {
-            rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
-        }
-        if let Some(rtp_end_port) = self.app_state.config.rtp_end_port {
-            rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
-        }
+    pub async fn create_rtp_track(&self, track_id: TrackId, ssrc: u32) -> Result<RtcTrack> {
+        let mut rtc_config = RtcTrackConfig::default();
+        rtc_config.mode = rustrtc::TransportMode::Rtp;
+        rtc_config.preferred_codec = Some(self.track_config.codec.clone());
+        rtc_config.rtp_port_range = self
+            .app_state
+            .config
+            .rtp_start_port
+            .zip(self.app_state.config.rtp_end_port);
 
         if let Some(ref external_ip) = self.app_state.config.external_ip {
             if let Ok(ip) = external_ip.parse() {
-                rtp_track = rtp_track.with_external_addr(ip);
+                rtc_config.local_addr = Some(ip);
             }
         }
-        if let Some(ref codecs) = self.app_state.config.codecs {
-            let mut enable_codecs = vec![];
-            for c in codecs {
-                match c.to_lowercase().as_str() {
-                    "pcmu" | "g711u" => enable_codecs.push(CodecType::PCMU),
-                    "pcma" | "g711a" => enable_codecs.push(CodecType::PCMA),
-                    "opus" => enable_codecs.push(CodecType::Opus),
-                    "g722" => enable_codecs.push(CodecType::G722),
-                    "g729" => enable_codecs.push(CodecType::G729),
-                    other => {
-                        warn!(
-                            session_id = self.session_id,
-                            codec = other,
-                            "unsupported codec in config, ignoring"
-                        );
-                    }
-                }
-            }
 
-            if !enable_codecs.is_empty() {
-                enable_codecs.push(CodecType::TelephoneEvent); // Always enable DTMF
-                rtp_track = rtp_track.with_enabled_codecs(enable_codecs);
-            }
-        };
-        rtp_track.build().await
+        let mut track = RtcTrack::new(
+            self.cancel_token.child_token(),
+            track_id,
+            self.track_config.clone(),
+            rtc_config,
+        )
+        .with_ssrc(ssrc);
+
+        track.create().await?;
+
+        Ok(track)
     }
 
     async fn setup_caller_track(&self, option: CallOption) -> Result<()> {
@@ -1479,17 +1475,23 @@ impl ActiveCall {
             )
         };
 
-        let mut webrtc_track = WebrtcTrack::new(
+        let mut rtc_config = RtcTrackConfig::default();
+        rtc_config.mode = rustrtc::TransportMode::WebRtc; // WebRTC
+        rtc_config.ice_servers = self.app_state.config.ice_servers.clone();
+
+        if let Some(ref external_ip) = self.app_state.config.external_ip {
+            if let Ok(ip) = external_ip.parse() {
+                rtc_config.local_addr = Some(ip);
+            }
+        }
+
+        let mut webrtc_track = RtcTrack::new(
             self.cancel_token.child_token(),
             self.session_id.clone(),
             self.track_config.clone(),
-            self.app_state.config.ice_servers.clone(),
+            rtc_config,
         )
         .with_ssrc(ssrc);
-
-        if let Some(ref external_ip) = self.app_state.config.external_ip {
-            webrtc_track = webrtc_track.with_external_ip(external_ip.clone());
-        }
 
         let timeout = option.handshake_timeout.map(|t| Duration::from_secs(t));
         let offer = match option.enable_ipv6 {
@@ -1684,25 +1686,23 @@ impl ActiveCall {
         let timeout = option.handshake_timeout.map(|t| Duration::from_secs(t));
 
         let mut media_track = if Self::is_webrtc_sdp(&offer) {
-            let mut rtp_track =
-                RtpTrackBuilder::new(self.session_id.clone(), self.track_config.clone())
-                    .with_ssrc(ssrc)
-                    .with_cancel_token(self.cancel_token.child_token());
-
-            if let Some(rtp_start_port) = self.app_state.config.rtp_start_port {
-                rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
-            }
-            if let Some(rtp_end_port) = self.app_state.config.rtp_end_port {
-                rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
-            }
-
+            let mut rtc_config = RtcTrackConfig::default();
+            rtc_config.mode = rustrtc::TransportMode::WebRtc;
+            rtc_config.ice_servers = self.app_state.config.ice_servers.clone();
             if let Some(ref external_ip) = self.app_state.config.external_ip {
                 if let Ok(ip) = external_ip.parse() {
-                    rtp_track = rtp_track.with_external_addr(ip);
+                    rtc_config.local_addr = Some(ip);
                 }
             }
 
-            let webrtc_track = rtp_track.build().await?;
+            let webrtc_track = RtcTrack::new(
+                self.cancel_token.child_token(),
+                self.session_id.clone(),
+                self.track_config.clone(),
+                rtc_config,
+            )
+            .with_ssrc(ssrc);
+
             Box::new(webrtc_track) as Box<dyn Track>
         } else {
             let rtp_track = self.create_rtp_track(self.session_id.clone(), ssrc).await?;

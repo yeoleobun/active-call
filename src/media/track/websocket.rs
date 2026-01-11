@@ -98,9 +98,11 @@ impl Track for WebsocketTrack {
             }
         };
         let sample_rate = self.config.samplerate;
+        let channels = self.config.channels;
         let payload_type = self.payload_type;
         let start_time = crate::media::get_timestamp();
         let ssrc = self.ssrc;
+        let processor_chain = self.processor_chain.clone();
         tokio::spawn(async move {
             let track_id_clone = track_id.clone();
             let audio_from_ws_loop = async move {
@@ -119,12 +121,18 @@ impl Track for WebsocketTrack {
                         },
                     };
 
-                    let packet = AudioFrame {
+                    let mut packet = AudioFrame {
                         track_id: track_id_clone.clone(),
                         samples,
                         timestamp: crate::media::get_timestamp(),
                         sample_rate,
+                        channels,
                     };
+
+                    if let Err(e) = processor_chain.process_frame(&mut packet) {
+                        warn!("error processing frame: {}", e);
+                    }
+
                     match packet_sender.send(packet) {
                         Ok(_) => (),
                         Err(e) => {
@@ -163,7 +171,11 @@ impl Track for WebsocketTrack {
     }
 
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
-        let (_, payload) = self.encoder.encode(self.payload_type, packet.clone());
+        let packet = packet.clone();
+        // Do not run the processor chain for outgoing packets to the user.
+        // The processor chain (VAD, ASR, etc.) is intended for audio coming FROM the user.
+
+        let (_, payload) = self.encoder.encode(self.payload_type, packet);
         if payload.is_empty() {
             return Ok(());
         }

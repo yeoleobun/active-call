@@ -17,6 +17,7 @@ fn test_basic_processing() {
             sample_rate,
             track_id: "test".to_string(),
             timestamp: 0,
+            channels: 1,
         };
         reducer.process_frame(&mut frame).unwrap();
         let samples = match frame.samples {
@@ -56,6 +57,7 @@ fn test_denoiser_performance() {
             sample_rate: sample_rate as u32,
             track_id: "test".to_string(),
             timestamp: 0,
+            channels: 1,
         };
         reducer.process_frame(&mut frame).unwrap();
     }

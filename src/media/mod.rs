@@ -6,7 +6,6 @@ pub mod denoiser;
 pub mod dtmf;
 pub mod engine;
 pub mod inactivity;
-pub mod jitter;
 pub mod negotiate;
 pub mod processor;
 pub mod recorder;
@@ -39,6 +38,7 @@ pub struct AudioFrame {
     pub samples: Samples,
     pub timestamp: u64,
     pub sample_rate: u32,
+    pub channels: u16,
 }
 
 impl Samples {
