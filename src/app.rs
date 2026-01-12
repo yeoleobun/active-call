@@ -110,20 +110,15 @@ impl AppStateInner {
                 }
             }
         }
-        let mut recorder_file = root.join(session_id);
         let desired_ext = self.config.recorder_format().extension();
-        let has_desired_ext = recorder_file
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case(desired_ext))
-            .unwrap_or(false);
-
-        if !has_desired_ext {
-            // Ensure the on-disk filename matches the configured recorder format extension.
-            recorder_file.set_extension(desired_ext);
+        let mut filename = session_id.clone();
+        if !filename
+            .to_lowercase()
+            .ends_with(&format!(".{}", desired_ext.to_lowercase()))
+        {
+            filename = format!("{}.{}", filename, desired_ext);
         }
-
-        recorder_file.to_string_lossy().to_string()
+        root.join(filename).to_string_lossy().to_string()
     }
 
     pub async fn serve(self: Arc<Self>) -> Result<()> {

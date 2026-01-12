@@ -336,16 +336,13 @@ impl RecorderOption {
             return;
         }
 
-        let mut path = PathBuf::from(&self.recorder_file);
-        let has_desired_ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case(effective_format.extension()))
-            .unwrap_or(false);
-
-        if !has_desired_ext {
-            path.set_extension(effective_format.extension());
-            self.recorder_file = path.to_string_lossy().into_owned();
+        let extension = effective_format.extension();
+        if !self
+            .recorder_file
+            .to_lowercase()
+            .ends_with(&format!(".{}", extension.to_lowercase()))
+        {
+            self.recorder_file = format!("{}.{}", self.recorder_file, extension);
         }
     }
 }
