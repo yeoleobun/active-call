@@ -181,7 +181,7 @@ impl RtcTrack {
             peer_connection.clone(),
             self.track_id.clone(),
             self.processor_chain.clone(),
-            payload_type,
+            self.payload_type.clone(),
         );
 
         if self.rtc_config.mode == TransportMode::Rtp {
@@ -195,7 +195,7 @@ impl RtcTrack {
                         self.track_id.clone(),
                         self.cancel_token.clone(),
                         self.processor_chain.clone(),
-                        payload_type,
+                        self.payload_type.clone(),
                     );
                 }
             }
@@ -209,7 +209,7 @@ impl RtcTrack {
         pc: Arc<PeerConnection>,
         track_id: TrackId,
         processor_chain: ProcessorChain,
-        default_payload_type: u8,
+        default_payload_type: Arc<std::sync::atomic::AtomicU8>,
     ) {
         let cancel_token = self.cancel_token.clone();
         let packet_sender = self.packet_sender.clone();
@@ -238,7 +238,7 @@ impl RtcTrack {
                             track_id_log.clone(),
                             cancel_token.clone(),
                             processor_chain.clone(),
-                            default_payload_type,
+                            default_payload_type.clone(),
                         );
                     }
                 }
@@ -282,7 +282,7 @@ impl RtcTrack {
         track_id: TrackId,
         cancel_token: CancellationToken,
         processor_chain: ProcessorChain,
-        default_payload_type: u8,
+        default_payload_type: Arc<std::sync::atomic::AtomicU8>,
     ) {
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<rustrtc::media::frame::AudioFrame>();
@@ -303,7 +303,7 @@ impl RtcTrack {
                     &track_id_proc,
                     &packet_sender_proc,
                     &processor_chain_proc,
-                    default_payload_type,
+                    default_payload_type.clone(),
                 )
                 .await;
             }
@@ -335,14 +335,16 @@ impl RtcTrack {
         track_id: &TrackId,
         packet_sender: &Arc<Mutex<Option<TrackPacketSender>>>,
         processor_chain: &ProcessorChain,
-        default_payload_type: u8,
+        default_payload_type: Arc<std::sync::atomic::AtomicU8>,
     ) {
         let packet_sender = packet_sender.lock().await;
         if let Some(sender) = packet_sender.as_ref() {
             let mut af = AudioFrame {
                 track_id: track_id.clone(),
                 samples: crate::media::Samples::RTP {
-                    payload_type: frame.payload_type.unwrap_or(default_payload_type),
+                    payload_type: frame.payload_type.unwrap_or_else(|| {
+                        default_payload_type.load(std::sync::atomic::Ordering::SeqCst)
+                    }),
                     payload: frame.data.to_vec(),
                     sequence_number: frame.sequence_number.unwrap_or(0),
                 },
