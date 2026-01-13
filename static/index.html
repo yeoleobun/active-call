@@ -426,6 +426,9 @@
         let rulerMarksSet = new Set();
         let messageMetrics = {};
         let latestAssistantTs = null;
+        let playIdToTs = {};
+        let playIdMetrics = {};
+        let textToTs = {};
 
         async function loadPlaybooks() {
             try {
@@ -502,27 +505,51 @@
                 if (activeBars.lastUserBars) activeBars.lastUserBars.forEach(b => b.jumpTs = ts);
             } else if (type === 'trackstart') {
                 activeBars.BOT = createBar('BOT', ts, 'bar-tts');
-                if (latestAssistantTs) activeBars.BOT.jumpTs = latestAssistantTs;
+                if (event.playId) {
+                    activeBars.BOT.playId = event.playId;
+                    if (playIdToTs[event.playId]) activeBars.BOT.jumpTs = playIdToTs[event.playId];
+                }
+                if (!activeBars.BOT.jumpTs && latestAssistantTs) activeBars.BOT.jumpTs = latestAssistantTs;
             } else if (type === 'trackend') {
                 endBar(activeBars.BOT, ts); activeBars.BOT = null;
             } else if (type === 'metrics') {
-                if (event.key === 'llm_call_start') activeBars.LLM = createBar('LLM', ts, 'bar-llm');
-                else if (event.key === 'llm_response') {
+                if (event.key === 'tts_play_id_map') {
+                    const playId = event.data.playId;
+                    const text = event.data.text ? event.data.text.trim() : null;
+                    if (playId && text && textToTs[text]) {
+                        playIdToTs[playId] = textToTs[text];
+                        if (playIdMetrics[playId]) {
+                            addMessage('assistant', null, textToTs[text], playIdMetrics[playId]);
+                        }
+                    }
+                } else if (event.key === 'llm_call_start') {
+                    activeBars.LLM = createBar('LLM', ts, 'bar-llm');
+                    if (event.data.playId) activeBars.LLM.playId = event.data.playId;
+                } else if (event.key === 'llm_response') {
                     endBar(activeBars.LLM, ts);
-                    addMessage('assistant', event.data.response, ts, {
+                    const playId = event.data.playId;
+                    if (playId) playIdToTs[playId] = ts;
+
+                    const metrics = {
                         llm: event.data.duration,
                         llm_ttfb: event.data.ttfb
-                    });
+                    };
+                    if (playId && playIdMetrics[playId]) Object.assign(metrics, playIdMetrics[playId]);
+
+                    addMessage('assistant', event.data.response, ts, metrics);
                     if (activeBars.LLM) activeBars.LLM.jumpTs = ts;
-                    if (activeBars.BOT) activeBars.BOT.jumpTs = ts;
+                    if (activeBars.BOT && (activeBars.BOT.playId === playId)) activeBars.BOT.jumpTs = ts;
                     activeBars.LLM = null;
                 } else if (event.key.startsWith('completed.tts.')) {
-                    const msgTs = (activeBars.BOT && activeBars.BOT.jumpTs) || latestAssistantTs;
-                    if (msgTs) {
-                        addMessage('assistant', null, msgTs, {
-                            tts: event.duration,
-                            tts_ttfb: event.data.ttfb
-                        });
+                    const playId = event.data.playId;
+                    const metrics = {
+                        tts: event.duration,
+                        tts_ttfb: event.data.ttfb
+                    };
+                    if (playId && playIdToTs[playId]) {
+                        addMessage('assistant', null, playIdToTs[playId], metrics);
+                    } else if (playId) {
+                        playIdMetrics[playId] = Object.assign(playIdMetrics[playId] || {}, metrics);
                     }
                 }
             } else if (type === 'addhistory') {
@@ -541,6 +568,7 @@
 
         function addMessage(role, text, ts, metrics = null) {
             if (role === 'assistant') latestAssistantTs = ts;
+            if (text) textToTs[text.trim()] = ts;
             if (metrics) {
                 messageMetrics[ts] = { ...(messageMetrics[ts] || {}), ...metrics };
             }
@@ -563,11 +591,11 @@
             let metricsHtml = '';
             if (currentMetrics) {
                 metricsHtml = `<div class="msg-metrics">` +
-                    (currentMetrics.asr ? `<span class="metric">ASR: ${currentMetrics.asr}ms</span>` : '') +
-                    (currentMetrics.llm ? `<span class="metric">LLM: ${currentMetrics.llm}ms</span>` : '') +
-                    (currentMetrics.llm_ttfb ? `<span class="metric">LLM TTFB: ${currentMetrics.llm_ttfb}ms</span>` : '') +
-                    (currentMetrics.tts ? `<span class="metric">TTS: ${currentMetrics.tts}ms</span>` : '') +
-                    (currentMetrics.tts_ttfb ? `<span class="metric">TTS TTFB: ${currentMetrics.tts_ttfb}ms</span>` : '') +
+                    (currentMetrics.asr !== undefined ? `<span class="metric">ASR: ${currentMetrics.asr}ms</span>` : '') +
+                    (currentMetrics.llm !== undefined ? `<span class="metric">LLM: ${currentMetrics.llm}ms</span>` : '') +
+                    (currentMetrics.llm_ttfb !== undefined ? `<span class="metric">LLM TTFB: ${currentMetrics.llm_ttfb}ms</span>` : '') +
+                    (currentMetrics.tts !== undefined ? `<span class="metric">TTS: ${currentMetrics.tts}ms</span>` : '') +
+                    (currentMetrics.tts_ttfb !== undefined ? `<span class="metric">TTS TTFB: ${currentMetrics.tts_ttfb}ms</span>` : '') +
                     `</div>`;
             }
 

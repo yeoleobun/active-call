@@ -278,13 +278,35 @@ impl LlmHandler {
     }
 
     pub fn set_event_sender(&mut self, sender: crate::event::EventSender) {
-        self.event_sender = Some(sender);
+        self.event_sender = Some(sender.clone());
+        // Send initial greeting if any
+        if let Some(greeting) = &self.config.greeting {
+            let _ = sender.send(crate::event::SessionEvent::AddHistory {
+                sender: Some("system".to_string()),
+                timestamp: crate::media::get_timestamp(),
+                speaker: "assistant".to_string(),
+                text: greeting.clone(),
+            });
+        }
     }
 
     fn send_debug_event(&self, key: &str, data: serde_json::Value) {
         if let Some(sender) = &self.event_sender {
+            let timestamp = crate::media::get_timestamp();
+            // If this is an LLM response, sync it with history
+            if key == "llm_response" {
+                if let Some(text) = data.get("response").and_then(|v| v.as_str()) {
+                    let _ = sender.send(crate::event::SessionEvent::AddHistory {
+                        sender: Some("llm".to_string()),
+                        timestamp,
+                        speaker: "assistant".to_string(),
+                        text: text.to_string(),
+                    });
+                }
+            }
+
             let event = crate::event::SessionEvent::Metrics {
-                timestamp: crate::media::get_timestamp(),
+                timestamp,
                 key: key.to_string(),
                 duration: 0,
                 data,
@@ -304,10 +326,24 @@ impl LlmHandler {
         auto_hangup: Option<bool>,
     ) -> Command {
         let timeout = wait_input_timeout.unwrap_or(10000);
+        let play_id = uuid::Uuid::new_v4().to_string();
+
+        if let Some(sender) = &self.event_sender {
+            let _ = sender.send(crate::event::SessionEvent::Metrics {
+                timestamp: crate::media::get_timestamp(),
+                key: "tts_play_id_map".to_string(),
+                duration: 0,
+                data: serde_json::json!({
+                    "playId": play_id,
+                    "text": text,
+                }),
+            });
+        }
+
         Command::Tts {
             text,
             speaker: None,
-            play_id: Some(uuid::Uuid::new_v4().to_string()),
+            play_id: Some(play_id),
             auto_hangup,
             streaming: None,
             end_of_stream: None,
@@ -319,15 +355,17 @@ impl LlmHandler {
 
     async fn generate_response(&mut self) -> Result<Vec<Command>> {
         let start_time = crate::media::get_timestamp();
+        let play_id = uuid::Uuid::new_v4().to_string();
+
         // Send debug event - LLM call started
         self.send_debug_event(
             "llm_call_start",
             json!({
                 "history_length": self.history.len(),
+                "playId": play_id,
             }),
         );
 
-        let play_id = uuid::Uuid::new_v4().to_string();
         let mut stream = self
             .provider
             .call_stream(&self.config, &self.history)
@@ -387,6 +425,7 @@ impl LlmHandler {
                 "is_json_mode": is_json_mode,
                 "duration": end_time - start_time,
                 "ttfb": first_token_time.map(|t| t - start_time).unwrap_or(0),
+                "playId": play_id,
             }),
         );
 

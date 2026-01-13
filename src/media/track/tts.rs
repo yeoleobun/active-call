@@ -428,6 +428,7 @@ impl TtsTask {
 
     // set cache key for each cmd, return true if cached and retrieve succeed
     async fn handle_cache(&mut self, cmd: &SynthesisCommand, cmd_seq: usize) -> bool {
+        let start_time_ms = crate::media::get_timestamp();
         let cache_key = cache::generate_cache_key(
             &format!("tts:{}{}", self.client.provider(), cmd.text),
             self.sample_rate,
@@ -460,6 +461,7 @@ impl TtsTask {
                         entry.finished = true;
                     });
 
+                    let duration = (crate::media::get_timestamp() - start_time_ms) as u32;
                     self.event_sender
                         .send(SessionEvent::Metrics {
                             timestamp: crate::media::get_timestamp(),
@@ -470,9 +472,9 @@ impl TtsTask {
                                     "cmdSeq": cmd_seq,
                                     "length": len,
                                     "cached": true,
-                                    "ttfb": 0,
+                                    "ttfb": duration,
                             }),
-                            duration: 0,
+                            duration,
                         })
                         .ok();
                     return true;
