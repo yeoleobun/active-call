@@ -112,21 +112,50 @@ pub async fn call_handler(
         // Check for pending playbook
         {
             let mut pending = app_state.pending_playbooks.lock().await;
-            if let Some(name) = pending.remove(&session_id) {
-                let path = PathBuf::from("config/playbook").join(&name);
+            if let Some(name_or_content) = pending.remove(&session_id) {
                 let variables = active_call.call_state.read().await.extras.clone();
-                match Playbook::load(path, variables.as_ref()).await {
+                let playbook_result = if name_or_content.trim().starts_with("---") {
+                    Playbook::parse(&name_or_content, variables.as_ref())
+                } else {
+                    let path = PathBuf::from("config/playbook").join(&name_or_content);
+                    Playbook::load(path, variables.as_ref()).await
+                };
+
+                match playbook_result {
                     Ok(playbook) => match PlaybookRunner::new(playbook, active_call.clone()) {
                         Ok(runner) => {
                             tokio::spawn(async move {
                                 runner.run().await;
                             });
-                            info!(session_id, "Playbook runner started for {}", name);
+                            let display_name = if name_or_content.trim().starts_with("---") {
+                                "custom content"
+                            } else {
+                                &name_or_content
+                            };
+                            info!(session_id, "Playbook runner started for {}", display_name);
                         }
-                        Err(e) => warn!(session_id, "Failed to create runner {}: {}", name, e),
+                        Err(e) => {
+                            let display_name = if name_or_content.trim().starts_with("---") {
+                                "custom content"
+                            } else {
+                                &name_or_content
+                            };
+                            warn!(
+                                session_id,
+                                "Failed to create runner {}: {}", display_name, e
+                            )
+                        }
                     },
                     Err(e) => {
-                        warn!(session_id, "Failed to load playbook {}: {}", name, e);
+                        let display_name = if name_or_content.trim().starts_with("---") {
+                            "custom content"
+                        } else {
+                            &name_or_content
+                        };
+                        warn!(
+                            session_id,
+                            "Failed to load playbook {}: {}", display_name, e
+                        );
                         let event = SessionEvent::Error {
                             timestamp: crate::media::get_timestamp(),
                             track_id: session_id,

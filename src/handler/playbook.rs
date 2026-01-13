@@ -10,8 +10,16 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+pub enum PlaybookSource {
+    File { playbook: String },
+    Content { content: String },
+}
+
+#[derive(Deserialize)]
 pub struct RunPlaybookParams {
-    pub playbook: String,
+    #[serde(flatten)]
+    pub source: PlaybookSource,
     pub r#type: Option<String>,
     pub to: Option<String>,
 }
@@ -138,6 +146,11 @@ pub async fn run_playbook(
     State(state): State<AppState>,
     Json(params): Json<RunPlaybookParams>,
 ) -> impl IntoResponse {
+    let playbook_val = match params.source {
+        PlaybookSource::File { playbook } => playbook,
+        PlaybookSource::Content { content } => content,
+    };
+
     let session_id = format!("s.{}", Uuid::new_v4().to_string());
 
     // Store pending playbook
@@ -145,9 +158,9 @@ pub async fn run_playbook(
         .pending_playbooks
         .lock()
         .await
-        .insert(session_id.clone(), params.playbook.clone());
+        .insert(session_id.clone(), playbook_val);
 
     // TODO: Handle SIP outbound if needed
 
-    Json(RunPlaybookResponse { session_id })
+    Json(RunPlaybookResponse { session_id }).into_response()
 }

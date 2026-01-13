@@ -118,7 +118,7 @@
 
         main {
             display: grid;
-            grid-template-columns: 1fr 400px;
+            grid-template-columns: 350px 1fr 350px;
             grid-template-rows: auto 1fr;
             flex-grow: 1;
             overflow: hidden;
@@ -218,6 +218,14 @@
         .bar-tts {
             background: var(--bot-color);
             opacity: 0.8;
+        }
+
+        .playbook-area {
+            background: #111;
+            border-right: 1px solid var(--border-color);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
         }
 
         .content-area {
@@ -399,6 +407,19 @@
                 </div>
             </div>
         </div>
+        <div class="playbook-area">
+            <div class="panel-header">
+                <h2>Playbook Editor</h2>
+                <div style="display: flex; gap: 4px;">
+                    <button class="btn-secondary" style="font-size: 10px;" onclick="savePlaybook()">Save</button>
+                    <button class="btn-secondary" style="font-size: 10px;"
+                        onclick="document.getElementById('playbook-editor').value = ''">Clear</button>
+                </div>
+            </div>
+            <textarea id="playbook-editor"
+                style="width: 100%; flex-grow: 1; background: #111; color: #ccc; border: none; padding: 12px; font-family: 'Fira Code', monospace; font-size: 12px; resize: none; outline: none; line-height: 1.6;"
+                placeholder="Paste markdown playbook here..."></textarea>
+        </div>
         <div class="content-area">
             <div class="panel-header">
                 <h2>Conversation</h2><button class="btn-secondary" style="font-size: 10px;"
@@ -440,12 +461,41 @@
                     opt.value = p.name; opt.textContent = p.name;
                     list.appendChild(opt);
                 });
-                list.onchange = (e) => {
+                list.onchange = async (e) => {
                     selectedPlaybook = e.target.value;
                     document.getElementById('run-btn').disabled = false;
                     document.getElementById('sip-call-btn').disabled = false;
+
+                    // Fetch playbook content
+                    try {
+                        const contentRes = await fetch(`/api/playbooks/${selectedPlaybook}`);
+                        if (contentRes.ok) {
+                            const content = await contentRes.text();
+                            document.getElementById('playbook-editor').value = content;
+                        }
+                    } catch (err) {
+                        console.error('Failed to fetch playbook content', err);
+                    }
                 };
             } catch (e) { logEntry('ERROR', e); }
+        }
+
+        async function savePlaybook() {
+            if (!selectedPlaybook) return;
+            const content = document.getElementById('playbook-editor').value;
+            try {
+                const res = await fetch(`/api/playbooks/${selectedPlaybook}`, {
+                    method: 'POST',
+                    body: content
+                });
+                if (res.ok) {
+                    alert('Playbook saved successfully');
+                } else {
+                    alert('Failed to save playbook');
+                }
+            } catch (err) {
+                alert('Error saving playbook: ' + err.message);
+            }
         }
 
         function updateRuler(ts) {
@@ -629,19 +679,27 @@
             activeBars = { USER: null, ASR: null, LLM: null, BOT: null };
         }
 
+        document.getElementById('playbook-editor').oninput = () => {
+            const hasContent = document.getElementById('playbook-editor').value.trim().length > 0;
+            document.getElementById('run-btn').disabled = !hasContent;
+            document.getElementById('sip-call-btn').disabled = !hasContent;
+        };
+
         document.getElementById('run-btn').onclick = async () => {
+            const content = document.getElementById('playbook-editor').value;
             const res = await fetch('/api/playbook/run', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ playbook: selectedPlaybook, type: 'webrtc' })
+                body: JSON.stringify({ content: content, type: 'webrtc' })
             });
             const data = await res.json(); startCall(data.session_id);
         };
 
         document.getElementById('sip-call-btn').onclick = async () => {
             const callee = document.getElementById('sip-uri').value;
+            const content = document.getElementById('playbook-editor').value;
             const res = await fetch('/api/playbook/run', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ playbook: selectedPlaybook, type: 'sip', to: callee })
+                body: JSON.stringify({ content: content, type: 'sip', to: callee })
             });
             const data = await res.json(); startSipCall(data.session_id, callee);
         };
