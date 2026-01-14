@@ -512,13 +512,13 @@ impl Track for RtcTrack {
                     let (_, encoded) = self.encoder.encode(payload_type, packet.clone());
                     let target_codec = CodecType::try_from(payload_type)?;
                     if !encoded.is_empty() {
-                        let target_samples =
-                            (samples.len() as u64 * target_codec.samplerate() as u64
-                                / packet.sample_rate as u64) as u32;
-                        let sample_count_per_channel =
-                            target_samples / self.track_config.channels as u32;
+                        let clock_rate = target_codec.clock_rate();
+                        let timestamp_increment =
+                            (samples.len() as u64 * clock_rate as u64
+                                / packet.sample_rate as u64
+                                / self.track_config.channels as u64) as u32;
                         let rtp_timestamp = self.next_rtp_timestamp.fetch_add(
-                            sample_count_per_channel,
+                            timestamp_increment,
                             std::sync::atomic::Ordering::SeqCst,
                         );
                         let sequence_number = self
@@ -527,7 +527,7 @@ impl Track for RtcTrack {
 
                         let frame = RtcAudioFrame {
                             data: Bytes::from(encoded),
-                            clock_rate: target_codec.clock_rate(),
+                            clock_rate,
                             payload_type: Some(payload_type),
                             sequence_number: Some(sequence_number),
                             rtp_timestamp,
@@ -540,19 +540,17 @@ impl Track for RtcTrack {
                     payload_type,
                     sequence_number,
                 } => {
-                    let target_sample_rate = match *payload_type {
-                        0 | 8 | 18 => 8000,
-                        9 => 16000,
+                    let clock_rate = match *payload_type {
+                        0 | 8 | 9 | 18 => 8000,
                         111 => 48000,
                         _ => packet.sample_rate,
                     };
 
-                    // Estimate samples if we don't have them
                     let increment = match *payload_type {
-                        0 | 8 | 18 => payload.len() as u32,
-                        9 => (payload.len() * 2) as u32,
-                        111 => (target_sample_rate / 50) as u32, // Assume 20ms for Opus if unknown
-                        _ => (target_sample_rate / 50) as u32,
+                        0 | 8 | 18 => payload.len() as u32,     
+                        9 => payload.len() as u32,
+                        111 => (clock_rate / 50) as u32,
+                        _ => (clock_rate / 50) as u32,
                     };
                     let rtp_timestamp = self
                         .next_rtp_timestamp
@@ -561,7 +559,7 @@ impl Track for RtcTrack {
 
                     let frame = RtcAudioFrame {
                         data: Bytes::from(payload.clone()),
-                        clock_rate: target_sample_rate,
+                        clock_rate,
                         payload_type: Some(*payload_type),
                         sequence_number: Some(sequence_number),
                         rtp_timestamp,

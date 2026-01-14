@@ -28,7 +28,6 @@ pub struct SynthesisCommand {
 }
 pub type SynthesisCommandSender = mpsc::UnboundedSender<SynthesisCommand>;
 pub type SynthesisCommandReceiver = mpsc::UnboundedReceiver<SynthesisCommand>;
-pub use self::tencent_cloud::strip_emoji_chars;
 
 #[derive(Debug, Clone, Serialize, Hash, Eq, PartialEq)]
 pub enum SynthesisType {
