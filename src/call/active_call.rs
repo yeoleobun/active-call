@@ -626,6 +626,19 @@ impl ActiveCall {
 
         if ready_to_answer_val {
             if !has_pending {
+                // emit reject event
+                warn!(session_id = self.session_id, "no pending call to accept");
+                let rejet_event = crate::event::SessionEvent::Reject {
+                    track_id: self.session_id.clone(),
+                    timestamp: crate::media::get_timestamp(),
+                    reason: "no pending call".to_string(),
+                    refer: None,
+                    code: Some(486),
+                };
+                self.event_sender.send(rejet_event).ok();
+                self.do_hangup(Some(CallRecordHangupReason::BySystem), None)
+                    .await
+                    .ok();
                 return Err(anyhow::anyhow!("no pending call to accept"));
             }
             option = self.invite_or_accept(option, "accept".to_string()).await?;
@@ -633,7 +646,7 @@ impl ActiveCall {
             option.check_default();
             self.call_state.write().await.option = Some(option.clone());
         }
-
+        info!(session_id = self.session_id, ?option, "accepting call");
         let ready = self.call_state.write().await.ready_to_answer.take();
         if let Some((answer, track, dialog)) = ready {
             info!(

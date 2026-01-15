@@ -206,13 +206,30 @@ impl DialogStateReceiverGuard {
                         .update_remote_description(&states.track_id, &answer.to_string())
                         .await?;
                 }
-                DialogState::Confirmed(dialog_id, _) => {
+                DialogState::Confirmed(dialog_id, msg) => {
                     info!(session_id=states.session_id, %dialog_id, "dialog confirmed");
                     {
                         let mut cs = states.call_state.write().await;
                         cs.session_id = dialog_id.to_string();
                         cs.answer_time.replace(Utc::now());
                         cs.last_status_code = 200;
+                    }
+                    if states.is_client {
+                        let answer = String::from_utf8_lossy(msg.body());
+                        let answer = answer.trim();
+                        if !answer.is_empty() {
+                            if let Err(e) = states
+                                .media_stream
+                                .update_remote_description(&states.track_id, &answer.to_string())
+                                .await
+                            {
+                                tracing::warn!(
+                                    session_id = states.session_id,
+                                    "failed to update remote description on confirmed: {}",
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
                 DialogState::Info(dialog_id, req, tx_handle) => {

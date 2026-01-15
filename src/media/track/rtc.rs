@@ -459,7 +459,22 @@ impl Track for RtcTrack {
     async fn update_remote_description(&mut self, answer: &String) -> Result<()> {
         if let Some(pc) = &self.peer_connection {
             let sdp_obj = rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, answer)?;
-            pc.set_remote_description(sdp_obj).await?;
+            match pc.set_remote_description(sdp_obj.clone()).await {
+                Ok(_) => {}
+                Err(e) => {
+                    if self.rtc_config.mode == TransportMode::Rtp {
+                        info!(track_id=%self.track_id, "set_remote_description failed ({}), attempting to re-sync state for SIP update", e);
+                        // SIP 200 OK often sends a final answer after 183 early answer.
+                        // WebRTC state machine dislikes multiple answers.
+                        // We trick it by creating a new local offer to reset state to HaveLocalOffer.
+                        let offer = pc.create_offer().await?;
+                        pc.set_local_description(offer)?;
+                        pc.set_remote_description(sdp_obj).await?;
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
 
             // Extract negotiated payload types from SDP string
             self.parse_sdp_payload_types(rustrtc::SdpType::Answer, answer)?;
