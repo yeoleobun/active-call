@@ -20,7 +20,6 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
 use tracing::{debug, warn};
-use unic_emoji::char::is_emoji;
 use urlencoding;
 use uuid::Uuid;
 
