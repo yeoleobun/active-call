@@ -20,7 +20,6 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
 use tracing::{debug, warn};
-use unic_emoji::char::is_emoji;
 use urlencoding;
 use uuid::Uuid;
 
@@ -96,16 +95,6 @@ impl From<&TencentSubtitle> for Subtitle {
             subtitle.end_index,
         )
     }
-}
-
-// tencent cloud will crash if text contains emoji
-// Only remove non-ASCII emoji characters. Keep all ASCII (digits, letters, punctuation),
-// since some ASCII (e.g., '0'..'9', '#', '*') are marked with the Unicode Emoji property
-// due to keycap sequences but are safe and expected in text.
-pub fn strip_emoji_chars(text: &str) -> String {
-    text.chars()
-        .filter(|&c| c.is_ascii() || !is_emoji(c))
-        .collect()
 }
 
 // construct request url
@@ -316,8 +305,7 @@ impl SynthesisClient for RealTimeClient {
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
-            let text = strip_emoji_chars(text);
-            tx.send((text, cmd_seq, option))?;
+            tx.send((text.to_string(), cmd_seq, option))?;
         } else {
             return Err(anyhow::anyhow!("TencentCloud TTS: missing client sender"));
         };
@@ -419,7 +407,6 @@ impl SynthesisClient for StreamingClient {
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(sink) = &mut self.sink {
-            let text = strip_emoji_chars(text);
             let request = WebSocketRequest::synthesis_action(&self.session_id, &text);
             let data = serde_json::to_string(&request)?;
             sink.send(Message::Text(data.into())).await?;

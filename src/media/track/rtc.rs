@@ -21,7 +21,10 @@ use rustrtc::{
         track::SampleStreamTrack,
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -61,10 +64,11 @@ pub struct RtcTrack {
     local_source: Option<Arc<SampleStreamSource>>,
     encoder: TrackCodec,
     ssrc: u32,
-    payload_type: Arc<std::sync::atomic::AtomicU8>,
+    payload_type: u8,
     pub peer_connection: Option<Arc<PeerConnection>>,
-    next_rtp_timestamp: Arc<std::sync::atomic::AtomicU32>,
-    next_rtp_sequence_number: Arc<std::sync::atomic::AtomicU16>,
+    next_rtp_timestamp: u32,
+    next_rtp_sequence_number: u16,
+    last_packet_time: Option<Instant>,
 }
 
 impl RtcTrack {
@@ -85,10 +89,11 @@ impl RtcTrack {
             local_source: None,
             encoder: TrackCodec::new(),
             ssrc: 0,
-            payload_type: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            payload_type: 0,
             peer_connection: None,
-            next_rtp_timestamp: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            next_rtp_sequence_number: Arc::new(std::sync::atomic::AtomicU16::new(0)),
+            next_rtp_timestamp: 0,
+            next_rtp_sequence_number: 0,
+            last_packet_time: None,
         }
     }
 
@@ -164,8 +169,7 @@ impl RtcTrack {
             .payload_type
             .unwrap_or_else(|| codec.payload_type());
 
-        self.payload_type
-            .store(payload_type, std::sync::atomic::Ordering::SeqCst);
+        self.payload_type = payload_type;
 
         let params = RtpCodecParameters {
             clock_rate: codec.clock_rate(),
@@ -181,7 +185,7 @@ impl RtcTrack {
             peer_connection.clone(),
             self.track_id.clone(),
             self.processor_chain.clone(),
-            self.payload_type.clone(),
+            self.payload_type,
         );
 
         if self.rtc_config.mode == TransportMode::Rtp {
@@ -195,7 +199,7 @@ impl RtcTrack {
                         self.track_id.clone(),
                         self.cancel_token.clone(),
                         self.processor_chain.clone(),
-                        self.payload_type.clone(),
+                        self.payload_type,
                     );
                 }
             }
@@ -209,7 +213,7 @@ impl RtcTrack {
         pc: Arc<PeerConnection>,
         track_id: TrackId,
         processor_chain: ProcessorChain,
-        default_payload_type: Arc<std::sync::atomic::AtomicU8>,
+        default_payload_type: u8,
     ) {
         let cancel_token = self.cancel_token.clone();
         let packet_sender = self.packet_sender.clone();
@@ -282,7 +286,7 @@ impl RtcTrack {
         track_id: TrackId,
         cancel_token: CancellationToken,
         processor_chain: ProcessorChain,
-        default_payload_type: Arc<std::sync::atomic::AtomicU8>,
+        default_payload_type: u8,
     ) {
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<rustrtc::media::frame::AudioFrame>();
@@ -303,7 +307,7 @@ impl RtcTrack {
                     &track_id_proc,
                     &packet_sender_proc,
                     &mut processor_chain_proc,
-                    default_payload_type.clone(),
+                    default_payload_type,
                 )
                 .await;
             }
@@ -335,13 +339,11 @@ impl RtcTrack {
         track_id: &TrackId,
         packet_sender: &Arc<Mutex<Option<TrackPacketSender>>>,
         processor_chain: &mut ProcessorChain,
-        default_payload_type: Arc<std::sync::atomic::AtomicU8>,
+        default_payload_type: u8,
     ) {
         let packet_sender = packet_sender.lock().await;
         if let Some(sender) = packet_sender.as_ref() {
-            let payload_type = frame
-                .payload_type
-                .unwrap_or_else(|| default_payload_type.load(std::sync::atomic::Ordering::SeqCst));
+            let payload_type = frame.payload_type.unwrap_or(default_payload_type);
             let src_codec = match CodecType::try_from(payload_type) {
                 Ok(c) => c,
                 Err(_) => {
@@ -401,8 +403,7 @@ impl RtcTrack {
                     if let Some(codec) = codec {
                         if codec != CodecType::TelephoneEvent {
                             info!(track_id=%self.track_id, "Negotiated primary audio PT {} ({:?})", pt, codec);
-                            self.payload_type
-                                .store(pt, std::sync::atomic::Ordering::SeqCst);
+                            self.payload_type = pt;
                             break;
                         }
                     }
@@ -512,22 +513,32 @@ impl Track for RtcTrack {
                     let (_, encoded) = self.encoder.encode(payload_type, packet.clone());
                     let target_codec = CodecType::try_from(payload_type)?;
                     if !encoded.is_empty() {
-                        let target_samples =
-                            (samples.len() as u64 * target_codec.samplerate() as u64
-                                / packet.sample_rate as u64) as u32;
-                        let sample_count_per_channel =
-                            target_samples / self.track_config.channels as u32;
-                        let rtp_timestamp = self.next_rtp_timestamp.fetch_add(
-                            sample_count_per_channel,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        let sequence_number = self
-                            .next_rtp_sequence_number
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let clock_rate = target_codec.clock_rate();
+
+                        let now = Instant::now();
+                        if let Some(last_time) = self.last_packet_time {
+                            let elapsed = now.duration_since(last_time);
+                            if elapsed.as_millis() > 50 {
+                                let gap_increment =
+                                    (elapsed.as_millis() as u32 * clock_rate) / 1000;
+                                self.next_rtp_timestamp += gap_increment;
+                            }
+                        }
+
+                        self.last_packet_time = Some(now);
+
+                        let timestamp_increment = (samples.len() as u64 * clock_rate as u64
+                            / packet.sample_rate as u64
+                            / self.track_config.channels as u64)
+                            as u32;
+                        let rtp_timestamp = self.next_rtp_timestamp;
+                        self.next_rtp_timestamp += timestamp_increment;
+                        let sequence_number = self.next_rtp_sequence_number;
+                        self.next_rtp_sequence_number += 1;
 
                         let frame = RtcAudioFrame {
                             data: Bytes::from(encoded),
-                            clock_rate: target_codec.clock_rate(),
+                            clock_rate,
                             payload_type: Some(payload_type),
                             sequence_number: Some(sequence_number),
                             rtp_timestamp,
@@ -540,28 +551,36 @@ impl Track for RtcTrack {
                     payload_type,
                     sequence_number,
                 } => {
-                    let target_sample_rate = match *payload_type {
-                        0 | 8 | 18 => 8000,
-                        9 => 16000,
+                    let clock_rate = match *payload_type {
+                        0 | 8 | 9 | 18 => 8000,
                         111 => 48000,
                         _ => packet.sample_rate,
                     };
 
-                    // Estimate samples if we don't have them
+                    let now = Instant::now();
+                    if let Some(last_time) = self.last_packet_time {
+                        let elapsed = now.duration_since(last_time);
+                        if elapsed.as_millis() > 50 {
+                            let gap_increment = (elapsed.as_millis() as u32 * clock_rate) / 1000;
+                            self.next_rtp_timestamp += gap_increment;
+                        }
+                    }
+                    self.last_packet_time = Some(now);
+
                     let increment = match *payload_type {
                         0 | 8 | 18 => payload.len() as u32,
-                        9 => (payload.len() * 2) as u32,
-                        111 => (target_sample_rate / 50) as u32, // Assume 20ms for Opus if unknown
-                        _ => (target_sample_rate / 50) as u32,
+                        9 => payload.len() as u32,
+                        111 => (clock_rate / 50) as u32,
+                        _ => (clock_rate / 50) as u32,
                     };
-                    let rtp_timestamp = self
-                        .next_rtp_timestamp
-                        .fetch_add(increment, std::sync::atomic::Ordering::SeqCst);
+
+                    let rtp_timestamp = self.next_rtp_timestamp;
+                    self.next_rtp_timestamp += increment;
                     let sequence_number = *sequence_number;
 
                     let frame = RtcAudioFrame {
                         data: Bytes::from(payload.clone()),
-                        clock_rate: target_sample_rate,
+                        clock_rate,
                         payload_type: Some(*payload_type),
                         sequence_number: Some(sequence_number),
                         rtp_timestamp,
@@ -577,7 +596,7 @@ impl Track for RtcTrack {
 
 impl RtcTrack {
     fn get_payload_type(&self) -> u8 {
-        let pt = self.payload_type.load(std::sync::atomic::Ordering::SeqCst);
+        let pt = self.payload_type;
         if pt != 0 {
             return pt;
         }

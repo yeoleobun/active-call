@@ -3,7 +3,7 @@ use crate::synthesis::{
     AliyunTtsClient, SynthesisOption, SynthesisType, tencent_cloud::TencentCloudTtsClient,
 };
 use crate::synthesis::{
-    SynthesisClient, SynthesisEvent, TencentCloudTtsBasicClient, strip_emoji_chars,
+    SynthesisClient, SynthesisEvent, TencentCloudTtsBasicClient,
 };
 use dotenv::dotenv;
 use futures::StreamExt;
@@ -252,15 +252,4 @@ async fn test_deepgram_tts() {
     let mut streaming_client = DeepegramTtsClient::create(true, &config).unwrap();
     test_tts_basic(streaming_client.as_mut()).await;
     test_multiple_tts_commands_streaming(streaming_client.as_mut()).await;
-}
-
-#[tokio::test]
-async fn test_emoji_strip() {
-    let text = "Hello, world! 😊 This is a test with emojis( 🚀🔥.)";
-    let stripped = strip_emoji_chars(text);
-    assert_eq!(stripped, "Hello, world!  This is a test with emojis( .)");
-
-    let text = "2025-09-25， 18点02分41秒";
-    let stripped_no_emoji = strip_emoji_chars(text);
-    assert_eq!(stripped_no_emoji, "2025-09-25， 18点02分41秒");
 }

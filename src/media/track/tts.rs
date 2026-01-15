@@ -1,12 +1,6 @@
 use crate::{
     event::{EventSender, SessionEvent},
-    media::AudioFrame,
-    media::Samples,
-    media::{
-        cache,
-        processor::ProcessorChain,
-        track::{Track, TrackConfig, TrackId, TrackPacketSender},
-    },
+    media::{AudioFrame, Samples, cache, processor::ProcessorChain, track::{Track, TrackConfig, TrackId, TrackPacketSender}},
     synthesis::{
         Subtitle, SynthesisClient, SynthesisCommand, SynthesisCommandReceiver,
         SynthesisCommandSender, SynthesisEvent, bytes_size_to_duration,
@@ -18,6 +12,7 @@ use audio_codec::bytes_to_samples;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
+use unic_emoji::char::is_emoji;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -95,6 +90,12 @@ struct TtsTask {
     cur_seq: usize,
     streaming: bool,
     graceful: Arc<AtomicBool>,
+}
+
+pub fn strip_emoji_chars(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c.is_ascii() || !is_emoji(c))
+        .collect()
 }
 
 impl TtsTask {
@@ -369,6 +370,8 @@ impl TtsTask {
         meta_entry.recv_time = crate::media::get_timestamp();
 
         let emit_entry = self.get_emit_entry_mut(assume_seq);
+
+        let text = strip_emoji_chars(text);
 
         // if text is empty:
         // in streaming mode, skip it
