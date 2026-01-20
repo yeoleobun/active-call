@@ -696,6 +696,7 @@ impl Track for RtcTrack {
                             sequence_number: Some(sequence_number),
                             rtp_timestamp,
                             marker,
+                            ..Default::default()
                         };
                         source.send_audio(frame).await.ok();
                     }
@@ -746,6 +747,7 @@ impl Track for RtcTrack {
                         sequence_number: Some(sequence_number),
                         rtp_timestamp,
                         marker,
+                        ..Default::default()
                     };
                     source.send_audio(frame).await.ok();
                 }
