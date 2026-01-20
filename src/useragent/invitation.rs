@@ -109,7 +109,8 @@ pub fn default_create_invite_handler(
                     return None;
                 }
             };
-            match PlaybookInvitationHandler::new(rules.clone(), default.clone(), app_state) {
+            let rules = rules.clone().unwrap_or_default();
+            match PlaybookInvitationHandler::new(rules, default.clone(), app_state) {
                 Ok(handler) => Some(Box::new(handler)),
                 Err(e) => {
                     tracing::error!("failed to create playbook invitation handler: {}", e);

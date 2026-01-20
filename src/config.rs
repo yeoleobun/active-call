@@ -173,7 +173,7 @@ pub enum InviteHandlerConfig {
         headers: Option<Vec<(String, String)>>,
     },
     Playbook {
-        rules: Vec<PlaybookRule>,
+        rules: Option<Vec<PlaybookRule>>,
         default: Option<String>,
     },
 }
@@ -339,6 +339,7 @@ playbook = "sales.md"
         assert!(config.handler.is_some());
         if let Some(InviteHandlerConfig::Playbook { rules, default }) = config.handler {
             assert_eq!(default, Some("default.md".to_string()));
+            let rules = rules.unwrap();
             assert_eq!(rules.len(), 3);
 
             assert_eq!(rules[0].caller, Some(r"^\+1\d{10}$".to_string()));
@@ -376,6 +377,7 @@ playbook = "us.md"
 
         if let Some(InviteHandlerConfig::Playbook { rules, default }) = config.handler {
             assert_eq!(default, None);
+            let rules = rules.unwrap();
             assert_eq!(rules.len(), 1);
         } else {
             panic!("Expected Playbook handler config");

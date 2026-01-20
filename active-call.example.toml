@@ -38,9 +38,6 @@ media_cache_path = "./config/mediacache"
 # username = "user"
 # credential = "pass"
 
-sip_addr = "0.0.0.0"
-sip_port = 13050     # don't use 5060
-
 # Invitation handler - handles incoming SIP invitations
 # Option 1: Webhook handler - forward invitations to HTTP endpoint
 # [handler]
@@ -66,10 +63,10 @@ sip_port = 13050     # don't use 5060
 # callee = "^sip:sales@.*"        # optional: only match callee
 # playbook = "sales.md"
 
-[sip_handler]
-type = "webhook"
-url = "http://localhost:8090/webhook"
-method = "POST"
+# [handler]
+# type = "webhook"
+# url = "http://localhost:8090/webhook"
+# method = "POST"
 
 [recording]
 enabled = true
@@ -78,3 +75,12 @@ auto_start = true
 [callrecord]
 type = "local"
 root = "./config/cdr"
+
+# [[register_users]]
+# server = "127.0.0.1:5060" # Your Asterisk server
+# username = "1002"        # SIP extension
+# disabled = false         # Set to true to disable this account
+
+# [register_users.credential]
+# username = "1002"
+# password = ""     # Leave empty for IP-based auth

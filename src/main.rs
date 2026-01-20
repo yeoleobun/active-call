@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let (mut config, config_path) = if let Some(path) = cli.conf {
         let config = Config::load(&path).unwrap_or_else(|e| {
-            warn!("Failed to load config from {}: {}, using defaults", path, e);
+            println!("Failed to load config from {}: {}, using defaults", path, e);
             Config::default()
         });
         (config, Some(path))
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
         } else if handler_str.ends_with(".md") {
             // Playbook handler with default playbook
             config.handler = Some(InviteHandlerConfig::Playbook {
-                rules: vec![],
+                rules: None,
                 default: Some(handler_str.clone()),
             });
             info!(

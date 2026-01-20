@@ -442,6 +442,7 @@ impl AppStateInner {
             .lock()
             .await
             .insert(user.clone(), handle.clone());
+        tracing::debug!(user = user.as_str(), "starting registration task");
         let alive_users = self.alive_users.clone();
 
         crate::spawn(async move {
