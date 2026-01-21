@@ -1,17 +1,23 @@
 ---
 asr:
-  provider: "aliyun"
-  #modelType: "fun-asr-2025-11-07"
+  provider: "sensevoice"
+  extra:
+    silence_threshold: "0.05" # only for sensevoice 0.03 - 0.1
+  # sensevoice is local provider
+  #language: "auto"
   ## see `TranscriptionOption` options
 llm:
   provider: "aliyun"
-  model: "glm-4.7"
-  # model: `env OPENAI_MODEL`
-  # baseUrl: `env OPENAI_BASE_URL`
-  # apiKey: `env OPENAI_API_KEY`
+  # model: "qwen-plus"
+  # model: # .env OPENAI_MODEL
+  # baseUrl: # .env OPENAI_BASE_URL
+  # apiKey: # .env OPENAI_API_KEY
 tts:
-  provider: "aliyun"
-  #model: "qwen3-tts-flash-2025-11-27"
+  provider: "supertonic"  # aliyun, tencent, supertonic
+  # supertonic is local provider
+  speaker: "M1"           # M1, M2, F1, F2
+  speed: 1.0
+  language: "en"          # en, ko, es, pt, fr
   ## see `SynthesisOption` options
 vad:
   provider: "silero"

@@ -11,14 +11,17 @@ use tracing::debug;
 
 mod aliyun;
 mod tencent_cloud;
-mod voiceapi;
+
+#[cfg(feature = "offline")]
+mod sensevoice;
 
 pub use aliyun::AliyunAsrClient;
 pub use aliyun::AliyunAsrClientBuilder;
 pub use tencent_cloud::TencentCloudAsrClient;
 pub use tencent_cloud::TencentCloudAsrClientBuilder;
-pub use voiceapi::VoiceApiAsrClient;
-pub use voiceapi::VoiceApiAsrClientBuilder;
+
+#[cfg(feature = "offline")]
+pub use sensevoice::{SensevoiceAsrClient, SensevoiceAsrClientBuilder};
 
 /// Common helper function for handling wait_for_answer logic with audio dropping
 pub async fn handle_wait_for_answer_with_audio_drop(
@@ -53,10 +56,11 @@ pub async fn handle_wait_for_answer_with_audio_drop(
 pub enum TranscriptionType {
     #[serde(rename = "tencent")]
     TencentCloud,
-    #[serde(rename = "voiceapi")]
-    VoiceApi,
     #[serde(rename = "aliyun")]
     Aliyun,
+    #[cfg(feature = "offline")]
+    #[serde(rename = "sensevoice")]
+    Sensevoice,
     Other(String),
 }
 
@@ -81,8 +85,9 @@ impl std::fmt::Display for TranscriptionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TranscriptionType::TencentCloud => write!(f, "tencent"),
-            TranscriptionType::VoiceApi => write!(f, "voiceapi"),
             TranscriptionType::Aliyun => write!(f, "aliyun"),
+            #[cfg(feature = "offline")]
+            TranscriptionType::Sensevoice => write!(f, "sensevoice"),
             TranscriptionType::Other(provider) => write!(f, "{}", provider),
         }
     }
@@ -96,8 +101,9 @@ impl<'de> Deserialize<'de> for TranscriptionType {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "tencent" => Ok(TranscriptionType::TencentCloud),
-            "voiceapi" => Ok(TranscriptionType::VoiceApi),
             "aliyun" => Ok(TranscriptionType::Aliyun),
+            #[cfg(feature = "offline")]
+            "sensevoice" => Ok(TranscriptionType::Sensevoice),
             _ => Ok(TranscriptionType::Other(value)),
         }
     }
@@ -115,12 +121,6 @@ impl TranscriptionOption {
                 }
                 if self.secret_key.is_none() {
                     self.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
-                }
-            }
-            Some(TranscriptionType::VoiceApi) => {
-                // Set the host from environment variable if not already set
-                if self.endpoint.is_none() {
-                    self.endpoint = std::env::var("VOICEAPI_ENDPOINT").ok();
                 }
             }
             Some(TranscriptionType::Aliyun) => {

@@ -34,6 +34,52 @@ async fn main() -> Result<()> {
     dotenv().ok();
 
     let cli = Cli::parse();
+
+    // Handle model download if requested
+    #[cfg(feature = "offline")]
+    if let Some(model_type) = &cli.download_models {
+        use active_call::offline::{ModelDownloader, ModelType};
+        use std::path::PathBuf;
+
+        let models_dir = PathBuf::from(&cli.models_dir);
+        let downloader = ModelDownloader::new()?;
+
+        let model = ModelType::from_str(model_type).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown model type: {}. Use: sensevoice, supertonic, or all",
+                model_type
+            )
+        })?;
+
+        downloader.download(model, &models_dir)?;
+        println!("✓ Models downloaded to: {}", models_dir.display());
+
+        if cli.exit_after_download {
+            return Ok(());
+        }
+    }
+
+    // Initialize offline models if feature is enabled
+    #[cfg(feature = "offline")]
+    {
+        use active_call::offline::{OfflineConfig, init_offline_models};
+        use std::path::PathBuf;
+
+        let offline_config =
+            OfflineConfig::new(PathBuf::from(&cli.models_dir), num_cpus::get().min(4));
+
+        // Only initialize if models directory exists
+        if offline_config.models_dir.exists() {
+            init_offline_models(offline_config)?;
+            println!("Offline models initialized from: {}", cli.models_dir);
+        } else {
+            println!(
+                "Models directory not found: {}. Offline features will not be available. Run with --download-models to download.",
+                cli.models_dir
+            );
+        }
+    }
+
     let (mut config, config_path) = if let Some(path) = cli.conf {
         let config = Config::load(&path).unwrap_or_else(|e| {
             println!("Failed to load config from {}: {}, using defaults", path, e);
@@ -98,7 +144,7 @@ async fn main() -> Result<()> {
     {
         env_filter = env_filter.add_directive(level.into());
     }
-
+    env_filter = env_filter.add_directive("ort=warn".parse()?);
     let mut file_layer = None;
     let mut guard_holder = None;
     let mut fmt_layer = None;

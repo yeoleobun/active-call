@@ -16,8 +16,11 @@ Playbook 文件由三部分组成：
 ### 2.1 基础引擎配置
 ```yaml
 asr:
-  provider: "aliyun" # 或 "openai", "tencent", "deepgram"
+  provider: "aliyun" # 或 "openai", "tencent", "deepgram", "sensevoice"
   language: "zh-CN"
+  # extra 参数用于向特定引擎传递额外配置
+  extra:
+    silence_threshold: "0.05" # 仅用于 sensevoice: 静音阈值 (默认 0.01)，调高可减少噪音误触发
 tts:
   provider: "aliyun"
   model: "sambert-zhichu-v1"

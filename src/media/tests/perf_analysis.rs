@@ -32,16 +32,16 @@ mod tests {
 
         let total_chunks = (duration_sec * 1000) / chunk_ms;
 
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
 
         // Data for PCMU scenario
         let input_data_pcmu: Vec<u8> = (0..total_chunks * samples_per_chunk_pcmu)
-            .map(|_| rng.random())
+            .map(|_| rng.r#gen())
             .collect();
 
         // Data for G729 scenario
         let input_data_g729: Vec<u8> = (0..total_chunks * bytes_per_chunk_g729)
-            .map(|_| rng.random())
+            .map(|_| rng.r#gen())
             .collect();
 
         // --- Common Components ---

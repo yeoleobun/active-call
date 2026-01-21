@@ -16,8 +16,11 @@ A Playbook file consists of three parts:
 ### 2.1 Engine Configuration
 ```yaml
 asr:
-  provider: "openai" # Options: "openai", "aliyun", "tencent", "deepgram"
+  provider: "openai" # Options: "openai", "aliyun", "tencent", "deepgram", "sensevoice"
   language: "en-US"
+  # extra parameter for passing specific engine configurations
+  extra:
+    silence_threshold: "0.05" # Only for sensevoice: silence threshold (default 0.01), increase to reduce noise triggers
 tts:
   provider: "openai"
   model: "tts-1"

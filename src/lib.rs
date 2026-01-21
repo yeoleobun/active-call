@@ -22,6 +22,10 @@ pub mod handler;
 pub mod locator;
 pub mod media;
 pub mod net_tool;
+
+#[cfg(feature = "offline")]
+pub mod offline;
+
 pub mod playbook;
 pub mod synthesis;
 pub mod transcription;

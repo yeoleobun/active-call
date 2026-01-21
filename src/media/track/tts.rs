@@ -247,6 +247,16 @@ impl TtsTask {
                         }
                     }
 
+                    if i == 0 && self.emit_q.is_empty() && cmd_finished && tts_finished {
+                        debug!(
+                            session_id = %self.session_id,
+                            track_id = %self.track_id,
+                            play_id = ?self.play_id,
+                            "tts task processed all data"
+                        );
+                        break;
+                    }
+
                     let samples = if i == 0 {
                         Samples::Empty
                     } else {

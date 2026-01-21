@@ -1,6 +1,6 @@
 [package]
 name = "active-call"
-version = "0.3.28"
+version = "0.3.26"
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>"]
 description = "A SIP/WebRTC voice agent"
@@ -12,7 +12,8 @@ categories = ["network-programming", "multimedia"]
 
 [features]
 opus = ["dep:opusic-sys"]
-default = ["opus"]
+default = ["opus", "offline"]
+offline = ["dep:symphonia", "dep:rubato"]
 not_vad = []
 aws-lc-bindgen = ["aws-lc-rs/bindgen"]
 
@@ -60,7 +61,7 @@ reqwest = { version = "0.13.1", features = [
 ] }
 object_store = { version = "0.13.0", features = ["aws", "azure", "gcp"] }
 serde_with = "3.16.1"
-rand = "0.9.2"
+rand = "0.8.5"
 humantime = "2.1.0"
 lru = "0.16.2"
 md5 = { package = "md-5", version = "0.10.6" }
@@ -82,6 +83,28 @@ rmp3 = "0.3"
 tempfile = "3.24.0"
 # Workaround for cross-compilation - generate bindings at compile time
 aws-lc-rs = "1"
+
+# Math / arrays (keep in sync with ort 2.0.0-rc.10 -> ndarray 0.16)
+ndarray = { version = "0.16.1" }
+rustfft = "6.2"
+num-complex = "0.4"
+hf-hub = { version = "0.4.3", default-features = false, features = [
+    "rustls-tls",
+    "tokio",
+    "ureq",
+] }
+# ONNX Runtime via ort crate (pinned prerelease due to registry mirror)
+ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
+ort-sys = { version = "2.0.0-rc.10" }
+knf-rs-sys = "0.3.2"
+
+# Audio processing for offline
+symphonia = { version = "0.5", optional = true, features = ["all"] }
+rubato = { version = "0.16", optional = true }
+unicode-normalization = "0.1"
+rand_distr = "0.4"
+num_cpus = "1.16"
+
 
 [dev-dependencies]
 tempfile = "3.23.0"

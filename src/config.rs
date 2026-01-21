@@ -21,6 +21,21 @@ pub struct Cli {
     /// SIP invitation handler: URL for webhook (http://...) or playbook file (.md)
     #[clap(long)]
     pub handler: Option<String>,
+
+    /// Download models (sensevoice, supertonic, or all)
+    #[cfg(feature = "offline")]
+    #[clap(long)]
+    pub download_models: Option<String>,
+
+    /// Models directory for offline inference
+    #[cfg(feature = "offline")]
+    #[clap(long, default_value = "./models")]
+    pub models_dir: String,
+
+    /// Exit after downloading models
+    #[cfg(feature = "offline")]
+    #[clap(long)]
+    pub exit_after_download: bool,
 }
 
 pub(crate) fn default_config_recorder_path() -> String {

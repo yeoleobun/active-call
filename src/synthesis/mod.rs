@@ -5,16 +5,22 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+
 mod aliyun;
 mod deepgram;
 mod tencent_cloud;
 mod tencent_cloud_basic;
-mod voiceapi;
+
+#[cfg(feature = "offline")]
+mod supertonic;
+
 pub use aliyun::AliyunTtsClient;
 pub use deepgram::DeepegramTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
 pub use tencent_cloud_basic::TencentCloudTtsBasicClient;
-pub use voiceapi::VoiceApiTtsClient;
+
+#[cfg(feature = "offline")]
+pub use supertonic::SupertonicTtsClient;
 
 #[derive(Clone, Default)]
 pub struct SynthesisCommand {
@@ -33,12 +39,13 @@ pub type SynthesisCommandReceiver = mpsc::UnboundedReceiver<SynthesisCommand>;
 pub enum SynthesisType {
     #[serde(rename = "tencent")]
     TencentCloud,
-    #[serde(rename = "voiceapi")]
-    VoiceApi,
     #[serde(rename = "aliyun")]
     Aliyun,
     #[serde(rename = "deepgram")]
     Deepgram,
+    #[cfg(feature = "offline")]
+    #[serde(rename = "supertonic")]
+    Supertonic,
     #[serde(rename = "other")]
     Other(String),
 }
@@ -47,9 +54,10 @@ impl std::fmt::Display for SynthesisType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SynthesisType::TencentCloud => write!(f, "tencent"),
-            SynthesisType::VoiceApi => write!(f, "voiceapi"),
             SynthesisType::Aliyun => write!(f, "aliyun"),
             SynthesisType::Deepgram => write!(f, "deepgram"),
+            #[cfg(feature = "offline")]
+            SynthesisType::Supertonic => write!(f, "supertonic"),
             SynthesisType::Other(provider) => write!(f, "{}", provider),
         }
     }
@@ -63,9 +71,10 @@ impl<'de> Deserialize<'de> for SynthesisType {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "tencent" => Ok(SynthesisType::TencentCloud),
-            "voiceapi" => Ok(SynthesisType::VoiceApi),
             "aliyun" => Ok(SynthesisType::Aliyun),
             "deepgram" => Ok(SynthesisType::Deepgram),
+            #[cfg(feature = "offline")]
+            "supertonic" => Ok(SynthesisType::Supertonic),
             _ => Ok(SynthesisType::Other(value)),
         }
     }
@@ -88,6 +97,7 @@ pub struct SynthesisOption {
     pub codec: Option<String>,
     pub subtitle: Option<bool>,
     pub model: Option<String>,
+    pub language: Option<String>,
     /// emotion: neutral、sad、happy、angry、fear、news、story、radio、poetry、
     /// call、sajiao、disgusted、amaze、peaceful、exciting、aojiao、jieshuo
     pub emotion: Option<String>,
@@ -111,6 +121,7 @@ impl SynthesisOption {
                 codec: other.codec.or(self.codec.clone()),
                 subtitle: other.subtitle.or(self.subtitle),
                 model: other.model.or(self.model.clone()),
+                language: other.language.or(self.language.clone()),
                 emotion: other.emotion.or(self.emotion.clone()),
                 endpoint: other.endpoint.or(self.endpoint.clone()),
                 extra: other.extra.or(self.extra.clone()),
@@ -201,6 +212,7 @@ impl Default for SynthesisOption {
             codec: Some("pcm".to_string()),
             subtitle: None,
             model: None,
+            language: None,
             emotion: None,
             endpoint: None,
             extra: None,

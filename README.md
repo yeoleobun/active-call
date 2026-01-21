@@ -36,6 +36,82 @@ The **Playbook** system is our recommended way to build complex, stateful voice 
 - **Flexible Processing Chain**: Easily add noise reduction, echo cancellation, or custom audio processors.
 - **Codec Support**: PCM16, G.711 (PCMU/PCMA), G.722, and Opus.
 
+### 5. Offline AI Capabilities (NEW)
+**Privacy-First & Cost-Effective**: Run ASR and TTS locally without cloud APIs
+
+- **Offline ASR**: [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) multi-language speech recognition (Chinese, English, Japanese, Korean, Cantonese)
+- **Offline TTS**: [Supertonic](https://github.com/supertone-inc/supertonic) high-quality multi-lingual text-to-speech (English, Korean, Spanish, Portuguese, French)
+- **Zero Latency Penalty**: Global singleton ONNX sessions shared across all calls
+- **Easy Setup**: One-command model download from HuggingFace
+- **No API Keys**: Perfect for on-premise deployments and GDPR compliance
+
+#### Quick Start with Offline Models
+
+We recommend using Docker to run `active-call` with offline models. The easiest way is to download the models first using a temporary container.
+
+**1. Download Models**
+
+```bash
+# Create a local directory for models
+mkdir -p $(pwd)/data/models
+
+# Download all models (SenseVoice & Supertonic)
+docker run --rm \
+  -v $(pwd)/data/models:/models \
+  ghcr.io/restsend/active-call:latest \
+  --download-models all --models-dir /models
+```
+
+> **Note for users in Mainland China**:
+> If you experience slow downloads from HuggingFace, you can use the mirror site by setting the `HF_ENDPOINT` environment variable:
+> ```bash
+> docker run --rm \
+>   -e HF_ENDPOINT=https://hf-mirror.com \
+>   -v $(pwd)/data/models:/models \
+>   ghcr.io/restsend/active-call:latest \
+>   --download-models all --models-dir /models
+> ```
+
+**2. Run with Models Mounted**
+
+Once downloaded, mount the models directory when running the service:
+
+```bash
+docker run -d \
+  -p 8080:8080 \
+  -p 13050:13050/udp \
+  -v $(pwd)/data/models:/app/models \
+  -v $(pwd)/config:/app/config \
+  ghcr.io/restsend/active-call:latest
+```
+
+#### Configuration
+
+```yaml
+# In your playbook .md file
+---
+asr:
+  provider: "sensevoice"  # Offline ASR
+  language: "zh"          # auto, zh, en, ja, ko, yue
+  
+tts:
+  provider: "supertonic"  # Offline TTS
+  speaker: "M1"           # M1, M2, F1, F2
+  speed: 1.0
+  language: "en"          # en, ko, es, pt, fr
+  
+vad:
+  provider: "silero"      # Uses built-in TinySilero
+---
+```
+
+**Benefits:**
+- 🔒 **Privacy**: All audio processing happens locally
+- 💰 **Cost**: No per-minute API charges
+- 🚀 **Performance**: Single model instance shared across calls
+- 🌍 **Offline**: Works without internet connection
+- 📦 **Self-Contained**: ~500MB model files, no external dependencies
+
 ## Protocol Flexibility
 
 ### Voice over WebSocket
@@ -339,6 +415,7 @@ docker run -d \
   -p 13050:13050/udp \
   -v $(pwd)/config.toml:/app/config.toml:ro \
   -v $(pwd)/config:/app/config \
+  -v $(pwd)/models:/app/models \
   ghcr.io/restsend/active-call:latest
 ```
 
@@ -366,19 +443,57 @@ Supported CLI options:
 
 ### Environment Variables
 
-If you have API keys, save them in an `.env` file:
+Active-call supports various environment variables for configuration. If you have API keys or credentials, save them in an `.env` file:
+
+#### Cloud Provider Credentials
 
 ```bash
+# OpenAI/Azure OpenAI
+OPENAI_API_KEY=sk-...
+AZURE_OPENAI_API_KEY=your_azure_key
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+
+# Aliyun (DashScope)
+DASHSCOPE_API_KEY=sk-...
+
+# Tencent Cloud
 TENCENT_APPID=your_app_id
 TENCENT_SECRET_ID=your_secret_id
 TENCENT_SECRET_KEY=your_secret_key
-DASHSCOPE_API_KEY=your_dashscope_api_key
 ```
 
-And mount it in the container like :
+#### LLM Provider Defaults
+
+When `llm.provider` is specified in playbooks, active-call automatically reads default API keys from environment:
+
+- **openai**: Reads `OPENAI_API_KEY`
+- **azure**: Reads `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT`
+- **dashscope** (Aliyun): Reads `DASHSCOPE_API_KEY`
+- **tencent**: Reads `TENCENT_APPID`, `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`
+
+#### Offline Model Configuration
 
 ```bash
+# Model directory (default: ./models)
+OFFLINE_MODELS_DIR=/path/to/models
+
+# HuggingFace Hub settings (optional)
+HF_ENDPOINT=https://hf-mirror.com  # Use mirror if needed
+HF_MIRROR=https://hf-mirror.com
+```
+
+#### Docker Usage
+
+Mount your `.env` file when running containers:
+
+```bash
+docker run -d \
+  --name active-call \
+  -p 8080:8080 -p 5060:5060/udp \
   -v $(pwd)/.env:/app/.env \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/models:/app/models \
+  active-call:latest
 ```
 
 ### Port Range
