@@ -58,6 +58,9 @@ The **Playbook** system is our recommended way to build complex, stateful voice 
 
 We recommend using Docker to run `active-call` with offline models. The easiest way is to download the models first using a temporary container.
 
+⚠️ Docker must have access to the internet to download models from HuggingFace.
+⚠️ Docker must run with `--net host` on OS to ensure proper SIP/RTP functionality.
+
 **1. Download Models**
 
 ```bash
@@ -89,6 +92,7 @@ Once downloaded, mount the models directory when running the service:
 
 ```bash
 docker run -d \
+  --net host \
   -p 8080:8080 \
   -p 13050:13050/udp \
   -v $(pwd)/data/models:/app/models \
@@ -219,10 +223,10 @@ Create `config/playbook/greeting.md`:
 ```markdown
 ---
 asr:
-  provider: "openai"
+  provider: "sensevoice"
 tts:
-  provider: "openai"
-  voice: "alloy"
+  provider: "supertonic"
+  speaker: "F1"
 llm:
   provider: "openai"
   model: "gpt-4o-mini"
@@ -364,10 +368,12 @@ Playbooks are defined in Markdown files with YAML frontmatter. The frontmatter c
 
 ```markdown
 ---
+
 asr:
-  provider: "openai"
+  provider: "sensevoice"
 tts:
-  provider: "openai"
+  provider: "supertonic"
+  speaker: "F1"
 llm:
   provider: "openai"
   model: "gpt-4-turbo"
@@ -440,9 +446,8 @@ cp active-call.example.toml config.toml
 
 ```bash
 docker run -d \
+  --net host \
   --name active-call \
-  -p 8080:8080 \
-  -p 13050:13050/udp \
   -v $(pwd)/config.toml:/app/config.toml:ro \
   -v $(pwd)/config:/app/config \
   -v $(pwd)/models:/app/models \
@@ -455,13 +460,11 @@ You can override configuration with CLI parameters:
 
 ```bash
 docker run -d \
+  --net host \
   --name active-call \
-  -p 8080:8080 \
   -p 13050:13050/udp \
   -v $(pwd)/config:/app/config \
   ghcr.io/restsend/active-call:latest \
-  --http 0.0.0.0:8080 \
-  --sip 0.0.0.0:13050 \
   --handler https://api.example.com/webhook
 ```
 
@@ -519,17 +522,13 @@ Mount your `.env` file when running containers:
 
 ```bash
 docker run -d \
+  --net host \
   --name active-call \
-  -p 8080:8080 -p 5060:5060/udp \
   -v $(pwd)/.env:/app/.env \
   -v $(pwd)/config:/app/config \
   -v $(pwd)/models:/app/models \
   active-call:latest
 ```
-
-### Port Range
-
-Use small range `20000-20100` for local development, bigger range like `20000-30000`, or host network for production.
 
 ## License
 
