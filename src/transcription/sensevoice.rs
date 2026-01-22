@@ -247,6 +247,7 @@ async fn process_stream(
                             end_time: None,
                             is_filler: None,
                             confidence: Some(1.0),
+                            task_id: None,
                         };
 
                         if let Err(e) = event_sender.send(event) {

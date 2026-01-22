@@ -1546,6 +1546,7 @@ mod tests {
             text: "hello".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
 
         let commands = handler.on_event(&event).await?;
@@ -1598,6 +1599,7 @@ mod tests {
             text: "reep".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
 
         let commands = handler.on_event(&event).await?;
@@ -1660,6 +1662,7 @@ mod tests {
             text: "I need help".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         let commands = handler.on_event(&event).await?;
         // "Hello! How can I help you today?" -> split into two + EOS
@@ -1680,6 +1683,7 @@ mod tests {
             text: "Tell me a joke".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         let commands = handler.on_event(&event).await?;
         assert_eq!(commands.len(), 1);
@@ -1705,6 +1709,7 @@ mod tests {
             text: "That's all, thanks".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         let commands = handler.on_event(&event).await?;
         // Should have Tts with auto_hangup
@@ -1750,6 +1755,7 @@ mod tests {
             text: "hi".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
 
         let commands = handler.on_event(&event).await?;
@@ -1828,6 +1834,7 @@ mod tests {
             text: "hello".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         handler.on_event(&event).await?;
         assert!(handler.is_speaking);
@@ -1845,6 +1852,7 @@ mod tests {
             text: "I...".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         let commands = handler.on_event(&event).await?;
         assert_eq!(commands.len(), 1);
@@ -1886,6 +1894,7 @@ mod tests {
             text: "loop".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
 
         let commands = handler.on_event(&event).await?;
@@ -2030,6 +2039,7 @@ mod tests {
             text: "User speaks".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         // This will trigger generate_response (consuming "Response to user" from provider)
         let _ = handler.on_event(&event).await?;
@@ -2068,6 +2078,7 @@ mod tests {
             text: "hello".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         handler.on_event(&event).await?;
         assert!(handler.is_speaking);
@@ -2082,6 +2093,7 @@ mod tests {
             text: "I...".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         let commands = handler.on_event(&event).await?;
         // Should be ignored due to protection period
@@ -2119,6 +2131,7 @@ mod tests {
             text: "hello".to_string(),
             is_filler: None,
             confidence: None,
+            task_id: None,
         };
         handler.on_event(&event).await?;
         assert!(handler.is_speaking);
@@ -2136,6 +2149,7 @@ mod tests {
             text: "uh".to_string(),
             is_filler: Some(true),
             confidence: None,
+            task_id: None,
         };
         let commands = handler.on_event(&event).await?;
         // Should be ignored
@@ -2152,6 +2166,7 @@ mod tests {
             text: "Wait".to_string(),
             is_filler: Some(false),
             confidence: None,
+            task_id: None,
         };
         let commands = handler.on_event(&event).await?;
         // Should trigger interruption

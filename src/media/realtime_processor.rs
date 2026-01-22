@@ -183,12 +183,12 @@ async fn run_realtime_loop(
                         }
                         Some("input_audio_buffer.speech_started") => {
                             debug!("Speech started detected by server");
-                            event_sender.send(SessionEvent::Transcription {
+                            event_sender.send(SessionEvent::Speaking{
                                 track_id: track_id.clone(),
-                                text: "".to_string(),
-                                is_final: false,
                                 timestamp: crate::media::get_timestamp(),
-                                extra: Some(json!({ "event": "speech_started" })),
+                                start_time: v["audio_start_ms"].as_u64().unwrap_or_default(),
+                                is_filler: None,
+                                confidence: None,
                             }).ok();
 
                             // Immediately signal interruption to stop current local playback
@@ -198,12 +198,16 @@ async fn run_realtime_loop(
                         }
                         Some("response.audio_transcript.delta") => {
                             if let Some(delta) = v["delta"].as_str() {
-                                event_sender.send(SessionEvent::Transcription {
+                                event_sender.send(SessionEvent::AsrDelta {
                                     track_id: track_id.clone(),
+                                    index: v["content_index"].as_u64().unwrap_or_default() as u32,
                                     text: delta.to_string(),
-                                    is_final: false,
                                     timestamp: crate::media::get_timestamp(),
-                                    extra: None,
+                                    task_id: Some(v["item_id"].as_str().unwrap_or_default().to_string()),
+                                    start_time: None,
+                                    end_time: None,
+                                    is_filler: None,
+                                    confidence: None,
                                 }).ok();
                             }
                         }

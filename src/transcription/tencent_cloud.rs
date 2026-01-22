@@ -54,6 +54,7 @@ pub struct TencentCloudAsrWord {
 pub struct TencentCloudAsrResponse {
     pub code: i32,
     pub message: String,
+    pub task_id: Option<String>,
     pub result: Option<TencentCloudAsrResult>,
 }
 
@@ -367,7 +368,7 @@ impl TencentCloudAsrClient {
                 match msg {
                     Ok(Message::Text(text)) => {
                         match serde_json::from_str::<TencentCloudAsrResponse>(&text) {
-                            Ok(response) => {
+                            Ok(mut response) => {
                                 if response.code != 0 {
                                     warn!(
                                         track_id,
@@ -380,7 +381,7 @@ impl TencentCloudAsrClient {
                                         response.message,
                                         response.code
                                     ));
-                                }
+                                };
                                 response.result.and_then(|result| {
                                     let event = if result.slice_type == 2 {
                                         SessionEvent::AsrFinal {
@@ -392,6 +393,7 @@ impl TencentCloudAsrClient {
                                             end_time: Some(begin_time + result.end_time as u64),
                                             is_filler: None,
                                             confidence: None,
+                                            task_id: response.task_id.take(),
                                         }
                                     } else {
                                         SessionEvent::AsrDelta {
@@ -403,6 +405,7 @@ impl TencentCloudAsrClient {
                                             end_time: Some(begin_time + result.end_time as u64),
                                             is_filler: None,
                                             confidence: None,
+                                            task_id: response.task_id.take(),
                                         }
                                     };
                                     event_sender.send(event).ok()?;

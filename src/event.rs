@@ -79,13 +79,6 @@ pub enum SessionEvent {
         end_time: u64,
         text: String,
     },
-    Transcription {
-        track_id: String,
-        text: String,
-        is_final: bool,
-        timestamp: u64,
-        extra: Option<serde_json::Value>,
-    },
     Interrupt {
         receiver: Option<String>,
     },
@@ -157,6 +150,7 @@ pub enum SessionEvent {
         text: String,
         is_filler: Option<bool>,
         confidence: Option<f32>,
+        task_id: Option<String>,
     },
     AsrDelta {
         track_id: String,
@@ -167,6 +161,7 @@ pub enum SessionEvent {
         text: String,
         is_filler: Option<bool>,
         confidence: Option<f32>,
+        task_id: Option<String>,
     },
     Metrics {
         timestamp: u64,

@@ -149,6 +149,7 @@ async fn test_playbook_run_flow() -> Result<()> {
         text: "I need help".to_string(),
         is_filler: None,
         confidence: None,
+        task_id: None,
     };
 
     // Send event

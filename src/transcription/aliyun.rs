@@ -357,6 +357,7 @@ impl AliyunAsrClient {
                                         end_time: Some(sentence_end_time),
                                         is_filler: None,
                                         confidence: None,
+                                        task_id: None,
                                     }
                                 } else {
                                     SessionEvent::AsrDelta {
@@ -368,6 +369,7 @@ impl AliyunAsrClient {
                                         end_time: Some(sentence_end_time),
                                         is_filler: None,
                                         confidence: None,
+                                        task_id: None,
                                     }
                                 };
                                 event_sender.send(event).ok();

@@ -66,6 +66,7 @@ impl MockAsrClientBuilder {
                             end_time: Some(active_call::media::get_timestamp() + 100),
                             is_filler: None,
                             confidence: None,
+                            task_id: None,
                         };
                         let _ = event_sender.send(event);
                     }
