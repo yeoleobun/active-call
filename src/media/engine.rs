@@ -24,10 +24,7 @@ use crate::{
 };
 
 #[cfg(feature = "offline")]
-use crate::{
-    synthesis::SupertonicTtsClient,
-    transcription::SensevoiceAsrClientBuilder,
-};
+use crate::{synthesis::SupertonicTtsClient, transcription::SensevoiceAsrClientBuilder};
 
 use anyhow::Result;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
@@ -96,13 +93,13 @@ impl Default for StreamEngine {
             TranscriptionType::Aliyun,
             Box::new(AliyunAsrClientBuilder::create),
         );
-        
+
         #[cfg(feature = "offline")]
         engine.register_asr(
             TranscriptionType::Sensevoice,
             Box::new(SensevoiceAsrClientBuilder::create),
         );
-        
+
         engine.register_tts(SynthesisType::Aliyun, AliyunTtsClient::create);
         engine.register_tts(SynthesisType::TencentCloud, TencentCloudTtsClient::create);
         engine.register_tts(
@@ -111,10 +108,10 @@ impl Default for StreamEngine {
         );
         engine.register_tts(SynthesisType::Deepgram, DeepegramTtsClient::create);
         engine.register_tts(SynthesisType::MsEdge, MsEdgeTtsClient::create);
-        
+
         #[cfg(feature = "offline")]
         engine.register_tts(SynthesisType::Supertonic, SupertonicTtsClient::create);
-        
+
         engine
     }
 }
@@ -259,7 +256,7 @@ impl StreamEngine {
         tts_option: &SynthesisOption,
     ) -> Result<(SynthesisHandle, Box<dyn Track>)> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let new_handle = SynthesisHandle::new(tx, play_id.clone());
+        let new_handle = SynthesisHandle::new(tx, play_id.clone(), ssrc);
         let tts_client = engine.create_tts_client(streaming, tts_option).await?;
         let tts_track = TtsTrack::new(track_id, session_id, streaming, play_id, rx, tts_client)
             .with_ssrc(ssrc)

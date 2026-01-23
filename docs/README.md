@@ -41,6 +41,7 @@ Explore advanced features in the [`features/`](../features/) directory:
 
 ### Scenario 1: Browser-based Voice Chat (WebRTC)
 → See [Configuration Guide - WebRTC Scenario](./config_guide.en.md#scenario-1-webrtc-calls-browser-communication)
+*(Note: Requires HTTPS or 127.0.0.1)*
 
 ### Scenario 2: Telephony Integration (SIP)
 → See [Configuration Guide - SIP Scenario](./config_guide.en.md#scenario-2-sip-calls-pbxfs-gateway-integration)

@@ -34,6 +34,7 @@ use unic_emoji::char::is_emoji;
 #[derive(Clone)]
 pub struct SynthesisHandle {
     pub play_id: Option<String>,
+    pub ssrc: u32,
     pub command_tx: SynthesisCommandSender,
 }
 
@@ -730,9 +731,10 @@ pub struct TtsTrack {
 }
 
 impl SynthesisHandle {
-    pub fn new(command_tx: SynthesisCommandSender, play_id: Option<String>) -> Self {
+    pub fn new(command_tx: SynthesisCommandSender, play_id: Option<String>, ssrc: u32) -> Self {
         Self {
             play_id,
+            ssrc,
             command_tx,
         }
     }

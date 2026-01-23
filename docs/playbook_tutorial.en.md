@@ -22,15 +22,15 @@ asr:
   extra:
     silence_threshold: "0.05" # Only for sensevoice: silence threshold (default 0.01), increase to reduce noise triggers
 tts:
-  provider: "openai"
-  model: "tts-1"
+  provider: "supertonic" # Default: "supertonic" for English (en), "msedge" for Chinese (zh)
+  model: "M1"
   speed: 1.0
   volume: 50
 llm:
   provider: "openai"
   model: "gpt-4o"
-  apiKey: "${OPENAI_API_KEY}" # Supports environment variables
-  baseUrl: "https://api.openai.com/v1"
+  apiKey: "OPENAI_API_KEY"
+  #baseUrl: "https://api.openai.com/v1"
   features: ["http_tool", "voice_emotion"] # Enable enhanced capabilities
 ```
 

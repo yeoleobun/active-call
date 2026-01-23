@@ -19,7 +19,7 @@ For comprehensive guides and tutorials, visit:
 `active-call` supports a wide range of communication protocols, ensuring compatibility with both legacy and modern systems:
 
 - **SIP (Telephony)**: Supports standard SIP signaling. Can act as a **SIP Client/Extension** to register with PBX systems like **[RustPBX](https://github.com/restsend/rustpbx)**, **FreeSWITCH** or **Asterisk**, or handle direct SIP incoming/outgoing calls.
-- **WebRTC**: Direct browser-to-agent communication with low-latency SRTP.
+- **WebRTC**: Direct browser-to-agent communication with low-latency SRTP. (Note: WebRTC requires a secure context. You must use **HTTPS** or **127.0.0.1** to access your web client).
 - **Voice over WebSocket**: A highly flexible API for custom integrations. Push raw PCM/encoded audio over WebSocket and receive real-time events.
 
 ### 2. Dual-Engine Dialogue Support
@@ -48,8 +48,8 @@ The **Playbook** system is our recommended way to build complex, stateful voice 
 
 **Privacy-First & Cost-Effective**: Run ASR and TTS locally without cloud APIs
 
-- **Offline ASR**: [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) multi-language speech recognition (Chinese, English, Japanese, Korean, Cantonese)
-- **Offline TTS**: [Supertonic](https://github.com/supertone-inc/supertonic) high-quality multi-lingual text-to-speech (English, Korean, Spanish, Portuguese, French)
+- **Offline ASR**: [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) multi-language speech recognition (Chinese, English, Japanese, Korean, Cantonese).
+- **Offline TTS**: [Supertonic](https://github.com/supertone-inc/supertonic) high-quality multi-lingual text-to-speech (English, Korean, Spanish, Portuguese, French). Default for English (en). For Chinese (zh), MsEdge TTS is used by default for TEST.
 - **Zero Latency Penalty**: Global singleton ONNX sessions shared across all calls
 - **Easy Setup**: One-command model download from HuggingFace
 - **No API Keys**: Perfect for on-premise deployments and GDPR compliance

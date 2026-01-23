@@ -22,15 +22,15 @@ asr:
   extra:
     silence_threshold: "0.05" # 仅用于 sensevoice: 静音阈值 (默认 0.01)，调高可减少噪音误触发
 tts:
-  provider: "aliyun"
-  model: "sambert-zhichu-v1"
+  provider: "msedge" # 默认值: 中文(zh)默认 msedge, 英文(en)默认 supertonic
+  model: "zh-CN-XiaoxiaoNeural"
   speed: 1.0
   volume: 50
 llm:
-  provider: "openai"
+  provider: "aliyun"
   model: "gpt-4o"
-  apiKey: "${OPENAI_API_KEY}" # 支持环境变量
-  baseUrl: "https://api.openai.com/v1"
+  #apiKey: "OPENAI_API_KEY"
+  #baseUrl: "https://api.openai.com/v1"
   features: ["http_tool", "voice_emotion"] # 启用增强功能
 ```
 

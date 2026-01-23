@@ -42,12 +42,9 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
 # Set ONNX Runtime dynamic library path
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so.${ORT_VERSION}
 
-# Create app user for security
-RUN groupadd -r activeuser && useradd -r -g activeuser activeuser
-
 # Create application directory structure
 WORKDIR /app
-RUN mkdir -p /app/config/mediacache /app/config/cdr /app/config/recorders /app/static
+RUN mkdir -p /app/config/mediacache /app/config/cdr /app/config/recorders  /app/config/playbook /app/static
 
 # Automatically pick the correct binary based on the architecture being built
 # We expect binaries to be placed in bin/amd64/ and bin/arm64/ by the build script
@@ -55,12 +52,7 @@ ARG TARGETARCH
 COPY bin/${TARGETARCH}/active-call /app/active-call
 COPY ./static /app/static
 COPY ./features /app/features
-
-# Set ownership
-RUN chown -R activeuser:activeuser /app
-
-# Switch to non-root user
-USER activeuser
+COPY ./config/playbook/hello.md /app/config/playbook/hello.md
 
 # Expose ports
 EXPOSE 8080

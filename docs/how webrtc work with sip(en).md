@@ -28,6 +28,7 @@ Signaling and audio streams are both delivered over WebSocket.
 - Protocol is complex, requiring STUN/TURN servers and multiple network components.
 - Native browser support with advanced audio features (noise suppression, echo cancellation).
 - Excellent jitter resilience; signaling is flexible and customizable, ideal for internet-based applications.
+- **Security Requirement**: Browsers require WebRTC to be used in a Secure Context (**HTTPS** or **127.0.0.1**).
 
 **Sequence Diagram:**
 ```mermaid

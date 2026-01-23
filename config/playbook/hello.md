@@ -1,8 +1,6 @@
 ---
 asr:
   provider: "sensevoice"
-  extra:
-    silence_threshold: "0.05" # only for sensevoice 0.03 - 0.1
   # sensevoice is local provider
   #language: "auto"
   ## see `TranscriptionOption` options

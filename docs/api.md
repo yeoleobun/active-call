@@ -37,6 +37,8 @@ const ws = new WebSocket('ws://localhost:8080/call?id=session123&dump=true');
 
 **Description:** Establishes a WebSocket connection for WebRTC call handling with audio stream transmitted via WebRTC RTP.
 
+> **Note**: WebRTC requires a Secure Context. Ensure you are accessing your web client via **HTTPS** or **127.0.0.1**, otherwise the browser will not enable WebRTC functionality.
+
 **Parameters:**
 - `id` (optional, string): Session ID. If not provided, a new UUID will be generated.
 - `dump` (optional, boolean): Enable event dumping. Default: `true`.
@@ -725,7 +727,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   - `secretId` (string, optional): Secret ID for VAD service authentication
 - `tts` (SynthesisOption, optional): Text-to-Speech configuration
   - `samplerate` (number, optional): TTS output sample rate in Hz
-  - `provider` (string, optional): TTS provider ("tencent", "aliyun", "deepgram", "voiceapi")
+  - `provider` (string, optional): TTS provider ("tencent", "aliyun", "deepgram", "msedge", "supertonic"). Default: "msedge" for Chinese (zh), "supertonic" for English (en).
   - `speed` (number, optional): Speech speed multiplier (default: 1.0)
   - `appId` (string, optional): Application ID for TTS service
   - `secretId` (string, optional): Secret ID for authentication

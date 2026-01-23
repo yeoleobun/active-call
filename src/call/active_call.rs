@@ -39,6 +39,171 @@ use tokio::{fs::File, select, sync::Mutex, sync::RwLock, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::AppStateBuilder;
+    use crate::callrecord::CallRecordHangupReason;
+    use crate::config::Config;
+    use crate::media::track::tts::SynthesisHandle;
+    use crate::synthesis::SynthesisCommand;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_tts_ssrc_reuse_for_autohangup() -> Result<()> {
+        let mut config = Config::default();
+        config.udp_port = 0; // Use random port
+        config.media_cache_path = "/tmp/mediacache".to_string();
+        let stream_engine = Arc::new(StreamEngine::default());
+        let app_state = AppStateBuilder::new()
+            .with_config(config)
+            .with_stream_engine(stream_engine)
+            .build()
+            .await?;
+
+        let cancel_token = CancellationToken::new();
+        let session_id = "test-session".to_string();
+        let track_config = TrackConfig::default();
+
+        let mut option = crate::CallOption::default();
+        option.tts = Some(crate::synthesis::SynthesisOption::default());
+
+        let active_call = Arc::new(ActiveCall::new(
+            ActiveCallType::Sip,
+            cancel_token.clone(),
+            session_id.clone(),
+            app_state.invitation.clone(),
+            app_state.clone(),
+            track_config,
+            None,
+            false,
+            None,
+            None,
+        ));
+
+        {
+            let mut state = active_call.call_state.write().await;
+            state.option = Some(option);
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<SynthesisCommand>();
+        let initial_ssrc = 12345;
+        let handle = SynthesisHandle::new(tx, Some("play_1".to_string()), initial_ssrc);
+
+        // 1. Set initial TTS handle
+        {
+            let mut state = active_call.call_state.write().await;
+            state.tts_handle = Some(handle);
+            state.current_play_id = Some("play_1".to_string());
+        }
+
+        // 2. Call do_tts with auto_hangup=true and same play_id
+        active_call
+            .do_tts(
+                "hangup now".to_string(),
+                None,
+                Some("play_1".to_string()),
+                Some(true),
+                false,
+                true,
+                None,
+                None,
+                false,
+            )
+            .await?;
+
+        // 3. Verify auto_hangup state uses the EXISTING SSRC
+        {
+            let state = active_call.call_state.read().await;
+            assert!(state.auto_hangup.is_some());
+            let (h_ssrc, reason) = state.auto_hangup.clone().unwrap();
+            assert_eq!(
+                h_ssrc, initial_ssrc,
+                "SSRC should be reused from existing handle"
+            );
+            assert_eq!(reason, CallRecordHangupReason::BySystem);
+        }
+
+        // 4. Verify command was sent to existing channel
+        let cmd = rx.try_recv().expect("Should have received tts command");
+        assert_eq!(cmd.text, "hangup now");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tts_new_ssrc_for_different_play_id() -> Result<()> {
+        let mut config = Config::default();
+        config.udp_port = 0; // Use random port
+        config.media_cache_path = "/tmp/mediacache".to_string();
+        let stream_engine = Arc::new(StreamEngine::default());
+        let app_state = AppStateBuilder::new()
+            .with_config(config)
+            .with_stream_engine(stream_engine)
+            .build()
+            .await?;
+
+        let active_call = Arc::new(ActiveCall::new(
+            ActiveCallType::Sip,
+            CancellationToken::new(),
+            "test-session".to_string(),
+            app_state.invitation.clone(),
+            app_state.clone(),
+            TrackConfig::default(),
+            None,
+            false,
+            None,
+            None,
+        ));
+
+        let mut tts_opt = crate::synthesis::SynthesisOption::default();
+        tts_opt.provider = Some(crate::synthesis::SynthesisType::MsEdge);
+        let mut option = crate::CallOption::default();
+        option.tts = Some(tts_opt);
+        {
+            let mut state = active_call.call_state.write().await;
+            state.option = Some(option);
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let initial_ssrc = 111;
+        let handle = SynthesisHandle::new(tx, Some("play_1".to_string()), initial_ssrc);
+
+        {
+            let mut state = active_call.call_state.write().await;
+            state.tts_handle = Some(handle);
+            state.current_play_id = Some("play_1".to_string());
+        }
+
+        // Call do_tts with DIFFERENT play_id
+        active_call
+            .do_tts(
+                "new play".to_string(),
+                None,
+                Some("play_2".to_string()),
+                Some(true),
+                false,
+                true,
+                None,
+                None,
+                false,
+            )
+            .await?;
+
+        // Verify auto_hangup uses a NEW SSRC (because it should interrupt and start fresh)
+        {
+            let state = active_call.call_state.read().await;
+            let (h_ssrc, _) = state.auto_hangup.clone().unwrap();
+            assert_ne!(
+                h_ssrc, initial_ssrc,
+                "Should use a new SSRC for different play_id"
+            );
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallParams {
@@ -797,17 +962,27 @@ impl ActiveCall {
         );
 
         let ssrc = rand::random::<u32>();
-        let should_interrupt = {
+        let (should_interrupt, picked_ssrc) = {
             let mut state = self.call_state.write().await;
+
+            let (target_ssrc, changed) = if let Some(handle) = &state.tts_handle {
+                if play_id.is_some() && state.current_play_id != play_id {
+                    (ssrc, true)
+                } else {
+                    (handle.ssrc, false)
+                }
+            } else {
+                (ssrc, false)
+            };
+
             state.auto_hangup = match auto_hangup {
-                Some(true) => Some((ssrc, CallRecordHangupReason::BySystem)),
-                _ => None,
+                Some(true) => Some((target_ssrc, CallRecordHangupReason::BySystem)),
+                _ => state.auto_hangup.clone(),
             };
             state.wait_input_timeout = wait_input_timeout;
 
-            let changed = play_id.is_some() && state.current_play_id != play_id;
             state.current_play_id = play_id.clone();
-            changed
+            (changed, target_ssrc)
         };
 
         if should_interrupt {
@@ -829,7 +1004,7 @@ impl ActiveCall {
             self.cancel_token.child_token(),
             self.session_id.clone(),
             self.server_side_track_id.clone(),
-            ssrc,
+            picked_ssrc,
             play_id.clone(),
             streaming,
             &play_command.option,

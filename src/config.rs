@@ -86,6 +86,13 @@ fn default_config_rtp_end_port() -> Option<u16> {
     Some(42000)
 }
 
+fn default_config_useragent() -> Option<String> {
+    Some(format!(
+        "active-call({} miuda.ai)",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 fn default_codecs() -> Option<Vec<String>> {
     let mut codecs = vec![
         "pcmu".to_string(),
@@ -168,6 +175,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_access_skip_paths: Vec<String>,
 
+    #[serde(default = "default_config_useragent")]
     pub useragent: Option<String>,
     pub register_users: Option<Vec<RegisterOption>>,
     pub graceful_shutdown: Option<bool>,

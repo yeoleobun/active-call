@@ -95,6 +95,13 @@ credential = "turnpass"
 
 ## Media Configuration
 
+### ASR/TTS Engine Defaults
+
+When using Playbooks or initiating calls via the API, if no provider is specified, Active Call will use the following defaults:
+
+- **Chinese (zh)**: TTS defaults to **msedge**, ASR defaults to **sensevoice** (offline) or **aliyun** (online).
+- **English (en)**: TTS defaults to **supertonic**, ASR defaults to **sensevoice** (offline) or **openai** (online).
+
 ### SIP Configuration
 
 ```toml
@@ -217,6 +224,8 @@ Active Call supports multiple calling scenarios through different WebSocket inte
 ### Scenario 1: WebRTC Calls (Browser Communication)
 
 **Use Case**: Web applications, browser clients directly communicating with AI Agent.
+
+> **Note**: WebRTC requires a Secure Context. Ensure you are accessing your web client via **HTTPS** or **127.0.0.1**, otherwise the browser will not enable WebRTC functionality.
 
 #### Configuration Points
 

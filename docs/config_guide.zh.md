@@ -92,6 +92,13 @@ credential = "turnpass"
 
 ## 媒体配置
 
+### ASR/TTS 引擎默认值
+
+在使用 Playbook 或通过 API 发起呼叫时，如果没有指定提供商，Active Call 将使用以下默认值：
+
+- **中文 (zh)**: TTS 默认使用 **msedge**, ASR 默认使用 **sensevoice**(离线) 或 **aliyun**(在线)。
+- **英文 (en)**: TTS 默认使用 **supertonic**, ASR 默认使用 **sensevoice**(离线) 或 **openai**(在线)。
+
 ### SIP 配置
 
 ```toml
@@ -214,6 +221,8 @@ Active Call 支持多种呼叫场景，通过不同的 WebSocket 接口发起呼
 ### 场景1: WebRTC 呼叫（浏览器通话）
 
 **使用场景**: 网页应用、浏览器客户端直接与 AI Agent 通话。
+
+> **注意**: WebRTC 需要安全上下文（Secure Context）。请确保通过 **HTTPS** 或 **127.0.0.1** 访问您的网页客户端，否则浏览器将无法启用 WebRTC 功能。
 
 #### 配置要点
 
