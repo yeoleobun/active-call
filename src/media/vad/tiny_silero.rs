@@ -10,6 +10,8 @@ const CHUNK_SIZE: usize = 512;
 const HIDDEN_SIZE: usize = 128;
 const STFT_WINDOW_SIZE: usize = 256;
 const STFT_STRIDE: usize = 128;
+const CONTEXT_SIZE: usize = 64; // Context from previous chunk for STFT continuity
+const STFT_PADDING: usize = 64; // Right padding for STFT (ReflectionPad1d)
 
 static SIGMOID_TABLE: Lazy<[f32; 1024]> = Lazy::new(|| {
     let mut table = [0.0; 1024];
@@ -93,9 +95,9 @@ impl SileroModel {
             window,
 
             enc0: Conv1dLayer::new(129, 128, 3, 1, 1, true),
-            enc1: Conv1dLayer::new(128, 64, 3, 2, 1, true),
+            enc1: Conv1dLayer::new(128, 64, 3, 2, 1, true), // stride=2, not 1
             enc2: Conv1dLayer::new(64, 64, 3, 2, 1, true),
-            enc3: Conv1dLayer::new(64, 128, 3, 1, 1, true),
+            enc3: Conv1dLayer::new(64, 128, 3, 1, 1, true), // stride=1, not 2
             lstm_w_ih: vec![],
             lstm_w_hh: vec![],
             lstm_b_ih: vec![],
@@ -163,8 +165,7 @@ impl SileroModel {
                 self.enc3.load_weights(data_f32);
             } else if name == "enc3_bias" {
                 self.enc3.load_bias(data_f32);
-            } else if name == "lstm_w_ih" {
-                // Transform from [4*H, H] to [H, 4*H]
+            } else if name == "lstm0_w_ih" {
                 let mut transformed = vec![0.0; data_f32.len()];
                 let h = HIDDEN_SIZE;
                 for i in 0..4 * h {
@@ -172,8 +173,9 @@ impl SileroModel {
                         transformed[j * 4 * h + i] = data_f32[i * h + j];
                     }
                 }
+
                 self.lstm_w_ih = transformed;
-            } else if name == "lstm_w_hh" {
+            } else if name == "lstm0_w_hh" {
                 // Transform from [4*H, H] to [H, 4*H]
                 let mut transformed = vec![0.0; data_f32.len()];
                 let h = HIDDEN_SIZE;
@@ -183,9 +185,9 @@ impl SileroModel {
                     }
                 }
                 self.lstm_w_hh = transformed;
-            } else if name == "lstm_b_ih" {
+            } else if name == "lstm0_b_ih" {
                 self.lstm_b_ih = data_f32;
-            } else if name == "lstm_b_hh" {
+            } else if name == "lstm0_b_hh" {
                 self.lstm_b_hh = data_f32;
             } else if name == "out_weight" {
                 self.out_layer.load_weights(data_f32);
@@ -218,6 +220,9 @@ pub struct SileroSession {
     buf_gates: Vec<f32>,
     buf_lstm_input: Vec<f32>,
     buf_chunk_f32: Vec<f32>,
+    buf_context: Vec<f32>,      // Store last 64 samples from previous chunk
+    buf_with_context: Vec<f32>, // 64 context + 512 chunk = 576 samples
+    buf_padded: Vec<f32>,       // 576 + 64 padding = 640 samples for STFT
 
     buffer: Vec<i16>,
     current_timestamp: u64,
@@ -238,15 +243,18 @@ impl SileroSession {
             buf_fft_output: vec![realfft::num_complex::Complex::new(0.0, 0.0); fft_output_len],
             buf_fft_scratch: vec![realfft::num_complex::Complex::new(0.0, 0.0); fft_scratch_len],
 
-            buf_enc0_out: vec![0.0; 128 * 3],
-            buf_enc1_out: vec![0.0; 64 * 2],
-            buf_enc2_out: vec![0.0; 64 * 1],
-            buf_enc3_out: vec![0.0; 128 * 1],
+            buf_enc0_out: vec![0.0; 128 * 4], // stride=1, input 4 -> output 4
+            buf_enc1_out: vec![0.0; 64 * 2],  // stride=2, input 4 -> output 2
+            buf_enc2_out: vec![0.0; 64 * 1],  // stride=2, input 2 -> output 1
+            buf_enc3_out: vec![0.0; 128 * 1], // stride=1, input 1 -> output 1
 
-            buf_mag: vec![0.0; 129 * 3],
+            buf_mag: vec![0.0; 129 * 4],
             buf_gates: vec![0.0; 4 * HIDDEN_SIZE],
             buf_lstm_input: vec![0.0; HIDDEN_SIZE],
             buf_chunk_f32: vec![0.0; CHUNK_SIZE],
+            buf_context: vec![0.0; CONTEXT_SIZE],
+            buf_with_context: vec![0.0; CONTEXT_SIZE + CHUNK_SIZE],
+            buf_padded: vec![0.0; CONTEXT_SIZE + CHUNK_SIZE + STFT_PADDING],
 
             buffer: Vec::with_capacity(CHUNK_SIZE),
             current_timestamp: 0,
@@ -396,15 +404,38 @@ impl TinySilero {
         })
     }
 
+    pub fn get_last_output_logit(&self) -> f32 {
+        let w = &self.model.out_layer.weights;
+        let b = self.model.out_layer.bias.as_ref().unwrap()[0];
+        let mut sum = b;
+        for j in 0..HIDDEN_SIZE {
+            let val = self.session.h[0][j];
+            let val_relu = if val > 0.0 { val } else { 0.0 };
+            sum += w[j] * val_relu;
+        }
+        sum
+    }
+
     pub fn predict(&mut self, audio: &[f32]) -> f32 {
         let model = &self.model;
         let session = &mut self.session;
 
-        for t in 0..3 {
+        session.buf_with_context[..CONTEXT_SIZE].copy_from_slice(&session.buf_context);
+        session.buf_with_context[CONTEXT_SIZE..].copy_from_slice(audio);
+
+        let input_len = CONTEXT_SIZE + CHUNK_SIZE; // 576
+        session.buf_padded[..input_len].copy_from_slice(&session.buf_with_context);
+
+        for i in 0..STFT_PADDING {
+            let src_idx = input_len - 2 - i; // -2 to skip the last element and go backwards
+            session.buf_padded[input_len + i] = session.buf_with_context[src_idx];
+        }
+
+        for t in 0..4 {
             let start = t * STFT_STRIDE;
             // Copy and Window
             for i in 0..STFT_WINDOW_SIZE {
-                session.buf_fft_input[i] = audio[start + i] * model.window[i];
+                session.buf_fft_input[i] = session.buf_padded[start + i] * model.window[i];
             }
 
             // FFT
@@ -424,30 +455,36 @@ impl TinySilero {
             }
         }
 
+        session
+            .buf_context
+            .copy_from_slice(&audio[CHUNK_SIZE - CONTEXT_SIZE..]);
+
         model
             .enc0
-            .forward(&session.buf_mag, 3, &mut session.buf_enc0_out);
+            .forward(&session.buf_mag, 4, &mut session.buf_enc0_out);
+
         model
             .enc1
-            .forward(&session.buf_enc0_out, 3, &mut session.buf_enc1_out);
+            .forward(&session.buf_enc0_out, 4, &mut session.buf_enc1_out);
+
         model
             .enc2
             .forward(&session.buf_enc1_out, 2, &mut session.buf_enc2_out);
+
         model
             .enc3
             .forward(&session.buf_enc2_out, 1, &mut session.buf_enc3_out);
+
         session
             .buf_lstm_input
             .copy_from_slice(&session.buf_enc3_out);
         let (b_ih, b_hh) = (&model.lstm_b_ih, &model.lstm_b_hh);
 
         session.buf_gates.copy_from_slice(b_ih);
-        // Add b_hh
         for (g, &b) in session.buf_gates.iter_mut().zip(b_hh.iter()) {
             *g += b;
         }
 
-        // Apply W_ih (Layout: [H, 4*H]) - Broadcasting input x
         for j in 0..HIDDEN_SIZE {
             let x = session.buf_lstm_input[j];
             if x == 0.0 {
@@ -458,7 +495,6 @@ impl TinySilero {
             super::simd::vec_fma(&mut session.buf_gates, weight_slice, x);
         }
 
-        // Apply W_hh (Layout: [H, 4*H]) - Broadcasting hidden state h
         for j in 0..HIDDEN_SIZE {
             let h_val = session.h[0][j];
             if h_val == 0.0 {
@@ -470,12 +506,12 @@ impl TinySilero {
         }
 
         let chunk = HIDDEN_SIZE;
+
         for j in 0..HIDDEN_SIZE {
-            // IFCO order
-            let i_gate = fast_sigmoid(session.buf_gates[0 * chunk + j]);
-            let f_gate = fast_sigmoid(session.buf_gates[1 * chunk + j]);
-            let g_gate = fast_tanh(session.buf_gates[2 * chunk + j]); // Cell
-            let o_gate = fast_sigmoid(session.buf_gates[3 * chunk + j]);
+            let i_gate = fast_sigmoid(session.buf_gates[0 * chunk + j]); // Position 0: I (Input)
+            let f_gate = fast_sigmoid(session.buf_gates[1 * chunk + j]); // Position 1: F (Forget)
+            let g_gate = fast_tanh(session.buf_gates[2 * chunk + j]); // Position 2: G (Cell/Gate)
+            let o_gate = fast_sigmoid(session.buf_gates[3 * chunk + j]); // Position 3: O (Output)
 
             let c_new = f_gate * session.c[0][j] + i_gate * g_gate;
             let h_val = o_gate * fast_tanh(c_new);
@@ -516,24 +552,18 @@ impl VadEngine for TinySilero {
         let mut results = Vec::new();
 
         while self.session.buffer.len() >= CHUNK_SIZE {
-            // Swap out buffer to satisfy borrow checker
             let mut chunk_f32 = std::mem::take(&mut self.session.buf_chunk_f32);
-            // Ensure capacity/length (should be preserved across calls)
             if chunk_f32.len() != CHUNK_SIZE {
                 chunk_f32.resize(CHUNK_SIZE, 0.0);
             }
 
-            // Convert to f32 without allocation
             for (i, sample) in self.session.buffer.iter().take(CHUNK_SIZE).enumerate() {
                 chunk_f32[i] = *sample as f32 / 32768.0;
             }
 
-            // Remove processed samples
             self.session.buffer.drain(..CHUNK_SIZE);
-
             let score = self.predict(&chunk_f32);
 
-            // Restore buffer
             self.session.buf_chunk_f32 = chunk_f32;
 
             let is_voice = score > self.config.voice_threshold;
