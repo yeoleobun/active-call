@@ -1424,6 +1424,8 @@ impl ActiveCall {
             rtc_config.external_ip = Some(external_ip.clone());
         }
 
+        rtc_config.enable_latching = self.app_state.config.enable_rtp_latching;
+
         let mut track = RtcTrack::new(
             self.cancel_token.child_token(),
             track_id,
@@ -1958,6 +1960,7 @@ impl ActiveCall {
             if let Some(ref external_ip) = self.app_state.config.external_ip {
                 rtc_config.external_ip = Some(external_ip.clone());
             }
+            rtc_config.enable_latching = self.app_state.config.enable_rtp_latching;
 
             let webrtc_track = RtcTrack::new(
                 self.cancel_token.child_token(),

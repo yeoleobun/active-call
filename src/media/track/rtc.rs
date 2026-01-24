@@ -38,6 +38,7 @@ pub struct RtcTrackConfig {
     pub preferred_codec: Option<CodecType>,
     pub codecs: Vec<CodecType>,
     pub payload_type: Option<u8>,
+    pub enable_latching: Option<bool>,
 }
 
 impl Default for RtcTrackConfig {
@@ -50,6 +51,7 @@ impl Default for RtcTrackConfig {
             preferred_codec: None,
             codecs: Vec::new(),
             payload_type: None,
+            enable_latching: None,
         }
     }
 }
@@ -134,6 +136,10 @@ impl RtcTrack {
             config.ssrc_start = self.ssrc;
         }
         config.transport_mode = self.rtc_config.mode.clone();
+        config.enable_latching = self
+            .rtc_config
+            .enable_latching
+            .unwrap_or_else(|| self.rtc_config.mode == TransportMode::Rtp);
 
         if let Some(ice_servers) = &self.rtc_config.ice_servers {
             config.ice_servers = ice_servers.clone();

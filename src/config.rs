@@ -86,6 +86,10 @@ fn default_config_rtp_end_port() -> Option<u16> {
     Some(42000)
 }
 
+fn default_config_rtp_latching() -> Option<bool> {
+    Some(true)
+}
+
 fn default_config_useragent() -> Option<String> {
     Some(format!(
         "active-call({} miuda.ai)",
@@ -188,6 +192,8 @@ pub struct Config {
     pub rtp_start_port: Option<u16>,
     #[serde(default = "default_config_rtp_end_port")]
     pub rtp_end_port: Option<u16>,
+    #[serde(default = "default_config_rtp_latching")]
+    pub enable_rtp_latching: Option<bool>,
 
     pub callrecord: Option<CallRecordConfig>,
     #[serde(default = "default_config_media_cache_path")]
@@ -294,6 +300,7 @@ impl Default for Config {
             external_ip: None,
             rtp_start_port: default_config_rtp_start_port(),
             rtp_end_port: default_config_rtp_end_port(),
+            enable_rtp_latching: Some(true),
             recording: None,
             rewrites: None,
         }
