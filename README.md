@@ -38,13 +38,20 @@ The **Playbook** system is our recommended way to build complex, stateful voice 
 - **Tool Integration**: Built-in support for DTMF, SIP Refer (Transfer), and custom Function Calling.
 - **Advanced Interaction**: Smart interruptions, filler word filtering, background ambiance, and automated post-call summaries via Webhooks.
 
-### 4. High-Performance Media Core
+### 5. Advanced Context Management (NEW)
+
+Enhance conversational fluidity with intelligent context handling:
+
+- **Context Repair**: Automatically detects and fixes fragmentation caused by pauses (e.g., users finishing sentences after an interruption).
+- **Rolling Summary**: Manages long conversations by periodically summarizing history to maintain context without hitting token limits.
+
+### 6. High-Performance Media Core
 
 - **Low-Latency VAD**: Includes **TinySilero** (optimized Rust implementation), significantly faster than standard ONNX models.
 - **Flexible Processing Chain**: Easily add noise reduction, echo cancellation, or custom audio processors.
 - **Codec Support**: PCM16, G.711 (PCMU/PCMA), G.722, and Opus.
 
-### 5. Offline AI Capabilities (NEW)
+### 7. Offline AI Capabilities (NEW)
 
 **Privacy-First & Cost-Effective**: Run ASR and TTS locally without cloud APIs
 

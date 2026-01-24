@@ -112,6 +112,8 @@ pub struct LlmConfig {
     pub greeting: Option<String>,
     pub language: Option<String>,
     pub features: Option<Vec<String>>,
+    pub repair_window_ms: Option<u64>,
+    pub summary_limit: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

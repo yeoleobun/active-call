@@ -22,7 +22,7 @@ use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 pub fn call_router() -> Router<AppState> {
@@ -314,7 +314,7 @@ pub async fn call_handler(
 
         let send_to_ws_loop = async {
             while let Some(event) = event_receiver_from_core.recv().await {
-                debug!(session_id, %event, "Sending WS message");
+                trace!(session_id, %event, "Sending WS message");
                 let message = match event.into_ws_message() {
                     Ok(msg) => msg,
                     Err(e) => {
