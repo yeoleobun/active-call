@@ -277,15 +277,50 @@ impl DialogStateReceiverGuard {
                 }
                 DialogState::Updated(dialog_id, _req, tx_handle) => {
                     info!(session_id = states.session_id, %dialog_id, "dialog update received");
+                    let mut answer_sdp = None;
                     if let Some(sdp_body) = _req.body().get(..) {
                         let sdp_str = String::from_utf8_lossy(sdp_body);
-                        info!(session_id=states.session_id, %dialog_id, "updating remote description:\n{}", sdp_str);
-                        states
-                            .media_stream
-                            .update_remote_description(&states.track_id, &sdp_str.to_string())
-                            .await?;
+                        if !sdp_str.is_empty()
+                            && (_req.method == rsip::Method::Invite
+                                || _req.method == rsip::Method::Update)
+                        {
+                            info!(session_id=states.session_id, %dialog_id, method=%_req.method, "handling re-invite/update offer");
+                            match states
+                                .media_stream
+                                .handshake(&states.track_id, sdp_str.to_string(), None)
+                                .await
+                            {
+                                Ok(sdp) => answer_sdp = Some(sdp),
+                                Err(e) => {
+                                    warn!(
+                                        session_id = states.session_id,
+                                        "failed to handle re-invite: {}", e
+                                    );
+                                }
+                            }
+                        } else {
+                            info!(session_id=states.session_id, %dialog_id, "updating remote description:\n{}", sdp_str);
+                            states
+                                .media_stream
+                                .update_remote_description(&states.track_id, &sdp_str.to_string())
+                                .await?;
+                        }
                     }
-                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
+
+                    if let Some(sdp) = answer_sdp {
+                        tx_handle
+                            .respond(
+                                rsip::StatusCode::OK,
+                                Some(vec![rsip::Header::ContentType(
+                                    "application/sdp".to_string().into(),
+                                )]),
+                                Some(sdp.into()),
+                            )
+                            .await
+                            .ok();
+                    } else {
+                        tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                    }
                 }
                 DialogState::Options(dialog_id, _req, tx_handle) => {
                     info!(session_id = states.session_id, %dialog_id, "dialog options received");

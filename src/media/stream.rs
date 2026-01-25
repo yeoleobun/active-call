@@ -172,6 +172,19 @@ impl MediaStream {
         }
         Ok(())
     }
+
+    pub async fn handshake(
+        &self,
+        track_id: &TrackId,
+        offer: String,
+        timeout: Option<Duration>,
+    ) -> Result<String> {
+        if let Some((track, _)) = self.tracks.lock().await.get_mut(track_id) {
+            return track.handshake(offer, timeout).await;
+        }
+        anyhow::bail!("track not found: {}", track_id)
+    }
+
     pub async fn update_track(&self, mut track: Box<dyn Track>, play_id: Option<String>) {
         self.remove_track(track.id(), false).await;
         if self.recorder_option.lock().await.is_some() {
