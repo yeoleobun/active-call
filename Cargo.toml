@@ -13,7 +13,13 @@ categories = ["network-programming", "multimedia"]
 [features]
 default = ["opus", "offline", "ort"]
 opus = ["dep:opusic-sys"]
-offline = ["dep:symphonia"]
+offline = [
+    "dep:symphonia",
+    "dep:knf-rs-sys",
+    "dep:ort",
+    "dep:hf-hub",
+    "dep:ndarray",
+]
 ort = ["ort/download-binaries"]
 cross = ["opus", "offline", "aws-lc-rs/bindgen", "ort/load-dynamic"]
 not_vad = []
@@ -21,7 +27,7 @@ not_vad = []
 [dependencies]
 opusic-sys = { version = "0.5.8", optional = true }
 audio-codec = { version = "0.3.30", features = ["opus"] }
-rustrtc = "0.3.14"
+rustrtc = "0.3.15"
 #rustrtc = { path = "../rustrtc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -48,7 +54,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-appender = "0.2.4"
 toml = "0.9.8"
 rsip = "0.4.0"
-rsipstack = "0.4.4"
+rsipstack = "0.4.5"
 #rsipstack = { path = "../rsipstack" }
 uuid = { version = "1.20.0", features = ["v4"] }
 reqwest = { version = "0.13.1", features = [
@@ -85,20 +91,20 @@ tempfile = "3.24.0"
 aws-lc-rs = "1"
 
 # Math / arrays (keep in sync with ort 2.0.0-rc.10 -> ndarray 0.16)
-ndarray = { version = "0.16.1" }
+ndarray = { version = "0.16.1", optional = true }
 rustfft = "6.2"
 num-complex = "0.4"
 hf-hub = { version = "0.4.3", default-features = false, features = [
     "rustls-tls",
     "tokio",
     "ureq",
-] }
+], optional = true }
 
 ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "std",
     "ndarray",
-] }
-knf-rs-sys = "0.3.2"
+], optional = true }
+knf-rs-sys = { version = "0.3.2", optional = true }
 openssl = { version = "0.10", features = ["vendored"] }
 
 # Audio processing for offline
@@ -106,7 +112,7 @@ symphonia = { version = "0.5", optional = true, features = ["all"] }
 unicode-normalization = "0.1"
 rand_distr = "0.4"
 num_cpus = "1.16"
-msedge-tts = "0.2.1"
+msedge-tts = "0.3.0"
 
 
 [dev-dependencies]
