@@ -14,8 +14,8 @@ use crate::{
     event::EventSender,
     media::TrackId,
     synthesis::{
-        AliyunTtsClient, DeepegramTtsClient, MsEdgeTtsClient, SynthesisClient, SynthesisOption,
-        SynthesisType, TencentCloudTtsBasicClient, TencentCloudTtsClient,
+        AliyunTtsClient, DeepegramTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
+        TencentCloudTtsBasicClient, TencentCloudTtsClient,
     },
     transcription::{
         AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
@@ -107,7 +107,6 @@ impl Default for StreamEngine {
             TencentCloudTtsBasicClient::create,
         );
         engine.register_tts(SynthesisType::Deepgram, DeepegramTtsClient::create);
-        engine.register_tts(SynthesisType::MsEdge, MsEdgeTtsClient::create);
 
         #[cfg(feature = "offline")]
         engine.register_tts(SynthesisType::Supertonic, SupertonicTtsClient::create);

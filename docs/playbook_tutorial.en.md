@@ -22,7 +22,7 @@ asr:
   extra:
     silence_threshold: "0.05" # Only for sensevoice: silence threshold (default 0.01), increase to reduce noise triggers
 tts:
-  provider: "supertonic" # Default: "supertonic" for English (en), "msedge" for Chinese (zh)
+  provider: "supertonic" # Default: "supertonic" for English (en), "aliyun" for Chinese (zh)
   model: "M1"
   speed: 1.0
   volume: 50

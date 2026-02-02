@@ -157,7 +157,7 @@ mod tests {
         ));
 
         let mut tts_opt = crate::synthesis::SynthesisOption::default();
-        tts_opt.provider = Some(crate::synthesis::SynthesisType::MsEdge);
+        tts_opt.provider = Some(crate::synthesis::SynthesisType::Aliyun);
         let mut option = crate::CallOption::default();
         option.tts = Some(tts_opt);
         {

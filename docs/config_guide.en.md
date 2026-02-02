@@ -99,7 +99,7 @@ credential = "turnpass"
 
 When using Playbooks or initiating calls via the API, if no provider is specified, Active Call will use the following defaults:
 
-- **Chinese (zh)**: TTS defaults to **msedge**, ASR defaults to **sensevoice** (offline) or **aliyun** (online).
+- **Chinese (zh)**: TTS defaults to **aliyun**, ASR defaults to **sensevoice** (offline) or **aliyun** (online).
 - **English (en)**: TTS defaults to **supertonic**, ASR defaults to **sensevoice** (offline) or **openai** (online).
 
 ### SIP Configuration

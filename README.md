@@ -56,7 +56,7 @@ Enhance conversational fluidity with intelligent context handling:
 **Privacy-First & Cost-Effective**: Run ASR and TTS locally without cloud APIs
 
 - **Offline ASR**: [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) multi-language speech recognition (Chinese, English, Japanese, Korean, Cantonese).
-- **Offline TTS**: [Supertonic](https://github.com/supertone-inc/supertonic) high-quality multi-lingual text-to-speech (English, Korean, Spanish, Portuguese, French). Default for English (en). For Chinese (zh), MsEdge TTS is used by default for TEST.
+- **Offline TTS**: [Supertonic](https://github.com/supertone-inc/supertonic) high-quality multi-lingual text-to-speech (English, Korean, Spanish, Portuguese, French). Default for English (en).
 - **Zero Latency Penalty**: Global singleton ONNX sessions shared across all calls
 - **Easy Setup**: One-command model download from HuggingFace
 - **No API Keys**: Perfect for on-premise deployments and GDPR compliance

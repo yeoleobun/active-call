@@ -22,8 +22,8 @@ asr:
   extra:
     silence_threshold: "0.05" # 仅用于 sensevoice: 静音阈值 (默认 0.01)，调高可减少噪音误触发
 tts:
-  provider: "msedge" # 默认值: 中文(zh)默认 msedge, 英文(en)默认 supertonic
-  model: "zh-CN-XiaoxiaoNeural"
+  provider: "aliyun" # 默认值: 中文(zh)默认 aliyun, 英文(en)默认 supertonic
+  model: "cosyvoice-v2"
   speed: 1.0
   volume: 50
 llm:

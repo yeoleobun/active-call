@@ -94,9 +94,9 @@ credential = "turnpass"
 
 ### ASR/TTS 引擎默认值
 
-在使用 Playbook 或通过 API 发起呼叫时，如果没有指定提供商，Active Call 将使用以下默认值：
+但在使用 Playbook 或通过 API 发起呼叫时，如果没有指定提供商，Active Call 将使用以下默认值：
 
-- **中文 (zh)**: TTS 默认使用 **msedge**, ASR 默认使用 **sensevoice**(离线) 或 **aliyun**(在线)。
+- **中文 (zh)**: TTS 默认使用 **aliyun**, ASR 默认使用 **sensevoice**(离线) 或 **aliyun**(在线)。
 - **英文 (en)**: TTS 默认使用 **supertonic**, ASR 默认使用 **sensevoice**(离线) 或 **openai**(在线)。
 
 ### SIP 配置
