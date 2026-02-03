@@ -35,6 +35,7 @@ pub struct RtcTrackConfig {
     pub ice_servers: Option<Vec<IceServer>>,
     pub external_ip: Option<String>,
     pub rtp_port_range: Option<(u16, u16)>,
+    pub bind_ip: Option<String>,
     pub preferred_codec: Option<CodecType>,
     pub codecs: Vec<CodecType>,
     pub payload_type: Option<u8>,
@@ -48,6 +49,7 @@ impl Default for RtcTrackConfig {
             ice_servers: None,
             external_ip: None,
             rtp_port_range: None,
+            bind_ip: None,
             preferred_codec: None,
             codecs: Vec::new(),
             payload_type: None,
@@ -143,6 +145,9 @@ impl RtcTrack {
 
         if let Some(external_ip) = &self.rtc_config.external_ip {
             config.external_ip = Some(external_ip.clone());
+        }
+        if let Some(bind_ip) = &self.rtc_config.bind_ip {
+            config.bind_ip = Some(bind_ip.clone());
         }
 
         config.enable_latching = self
@@ -646,7 +651,7 @@ impl Track for RtcTrack {
 
         debug!(track_id=%self.track_id, "Before set_remote_description: transceivers count = {}", pc.get_transceivers().len());
         for (i, t) in pc.get_transceivers().iter().enumerate() {
-            debug!(track_id=%self.track_id, "  Transceiver #{}: kind={:?}, mid={:?}, direction={:?}", 
+            debug!(track_id=%self.track_id, "  Transceiver #{}: kind={:?}, mid={:?}, direction={:?}",
                 i, t.kind(), t.mid(), t.direction());
         }
 
@@ -655,7 +660,7 @@ impl Track for RtcTrack {
 
         debug!(track_id=%self.track_id, "After set_remote_description: transceivers count = {}", pc.get_transceivers().len());
         for (i, t) in pc.get_transceivers().iter().enumerate() {
-            debug!(track_id=%self.track_id, "  Transceiver #{}: kind={:?}, mid={:?}, direction={:?}, has_receiver={}", 
+            debug!(track_id=%self.track_id, "  Transceiver #{}: kind={:?}, mid={:?}, direction={:?}, has_receiver={}",
                 i, t.kind(), t.mid(), t.direction(), t.receiver().is_some());
         }
 
