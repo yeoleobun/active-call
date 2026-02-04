@@ -7,6 +7,7 @@ use crate::{
         ambiance::AmbianceProcessor,
         engine::StreamEngine,
         negotiate::strip_ipv6_candidates,
+        processor::SubscribeProcessor,
         recorder::RecorderOption,
         stream::{MediaStream, MediaStreamBuilder},
         track::{
@@ -215,7 +216,7 @@ pub struct CallParams {
     pub server_side_track: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ActiveCallType {
     Webrtc,
@@ -1669,7 +1670,7 @@ impl ActiveCall {
     }
 
     pub async fn update_track_wrapper(&self, mut track: Box<dyn Track>, play_id: Option<String>) {
-        let ambiance_opt = {
+        let (ambiance_opt, subscribe) = {
             let state = self.call_state.read().await;
             let mut opt = state
                 .option
@@ -1680,7 +1681,14 @@ impl ActiveCall {
             if let Some(global) = &self.app_state.config.ambiance {
                 opt.merge(global);
             }
-            opt
+
+            let subscribe = state
+                .option
+                .as_ref()
+                .and_then(|o| o.subscribe)
+                .unwrap_or_default();
+
+            (opt, subscribe)
         };
         if track.id() == &self.server_side_track_id && ambiance_opt.path.is_some() {
             match AmbianceProcessor::new(ambiance_opt).await {
@@ -1693,6 +1701,18 @@ impl ActiveCall {
                 }
             }
         }
+
+        if subscribe && self.call_type != ActiveCallType::WebSocket {
+            let (track_index, sub_track_id) = if track.id() == &self.server_side_track_id {
+                (0, self.server_side_track_id.clone())
+            } else {
+                (1, self.session_id.clone())
+            };
+            let sub_processor =
+                SubscribeProcessor::new(self.event_sender.clone(), sub_track_id, track_index);
+            track.append_processor(Box::new(sub_processor));
+        }
+
         self.call_state.write().await.current_play_id = play_id.clone();
         self.media_stream.update_track(track, play_id).await;
     }

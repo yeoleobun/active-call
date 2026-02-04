@@ -1,5 +1,6 @@
 use super::INTERNAL_SAMPLERATE;
 use super::track::track_codec::TrackCodec;
+use crate::event::{EventSender, SessionEvent};
 use crate::media::{AudioFrame, Samples};
 use anyhow::Result;
 use std::any::Any;
@@ -124,6 +125,43 @@ impl ProcessorChain {
         // Process the frame with all processors
         for processor in processors.iter_mut() {
             processor.process_frame(frame)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct SubscribeProcessor {
+    event_sender: EventSender,
+    track_id: String,
+    track_index: u8, // 0 for caller, 1 for callee
+}
+
+impl SubscribeProcessor {
+    pub fn new(event_sender: EventSender, track_id: String, track_index: u8) -> Self {
+        Self {
+            event_sender,
+            track_id,
+            track_index,
+        }
+    }
+}
+
+impl Processor for SubscribeProcessor {
+    fn process_frame(&mut self, frame: &mut AudioFrame) -> Result<()> {
+        if let Samples::PCM { samples } = &frame.samples {
+            if !samples.is_empty() {
+                let pcm_data = audio_codec::samples_to_bytes(samples);
+                let mut data = Vec::with_capacity(pcm_data.len() + 1);
+                data.push(self.track_index);
+                data.extend_from_slice(&pcm_data);
+
+                let event = SessionEvent::Binary {
+                    track_id: self.track_id.clone(),
+                    timestamp: frame.timestamp,
+                    data,
+                };
+                self.event_sender.send(event).ok();
+            }
         }
         Ok(())
     }

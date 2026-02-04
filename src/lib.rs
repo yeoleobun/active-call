@@ -65,6 +65,7 @@ pub struct CallOption {
     pub ambiance: Option<AmbianceOption>,
     pub eou: Option<EouOption>,
     pub realtime: Option<RealtimeOption>,
+    pub subscribe: Option<bool>,
 }
 
 impl Default for CallOption {
@@ -88,6 +89,7 @@ impl Default for CallOption {
             ambiance: None,
             eou: None,
             realtime: None,
+            subscribe: None,
         }
     }
 }

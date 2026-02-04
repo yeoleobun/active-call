@@ -745,6 +745,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   - `inputSampleRate` (number): Sample rate of audio received from WebSocket server
   - `outputSampleRate` (number): Sample rate of audio sent to WebSocket server
   - `packetSize` (number, optional): Packet size sent to WebSocket server in bytes (default: 2560)
+- `subscribe` (boolean, optional): Enable real-time audio subscription for non-WebSocket calls (SIP/WebRTC). If true, audio will be pushed via the control WebSocket using binary frames with a 1-byte track header (0x00 for caller, 0x01 for callee).
 - `handshakeTimeout` (number, optional): Timeout for connection handshake in seconds (e.g., 30)
 - `enableIpv6` (boolean, optional): Enable IPv6 support for networking
 - `inactivityTimeout` (number, optional): Timeout for audio inactivity in seconds
@@ -1218,13 +1219,13 @@ Events are received as JSON messages from the server. All timestamps are in mill
 ```
 
 #### Binary Event (Audio Data)
-**Triggered when:** Binary audio data is sent (WebSocket calls only).
+**Triggered when:** Binary audio data is sent (WebSocket calls or calls with `subscribe: true`).
 
 **Fields:**
 - `event` (string): Always "binary"
-- `trackId` (string): **Unique identifier for the audio track.**
+- `trackId` (string): **Unique identifier for the audio track.** For subscribed SIP/WebRTC calls, Caller uses `server-side-trackid`, Callee uses the session ID.
 - `timestamp` (number): Event timestamp in milliseconds since Unix epoch
-- `data` (array): Binary audio data bytes
+- `data` (array): Binary audio data bytes. In `subscribe` mode, the first byte is the track index (0 for Caller, 1 for Callee) followed by original PCM data.
 
 ```json
 {
