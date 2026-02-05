@@ -95,6 +95,10 @@ struct TtsTask {
     cur_seq: usize,
     streaming: bool,
     graceful: Arc<AtomicBool>,
+    // Jitter buffer state
+    buffering_state: Option<Instant>,
+    min_buffer_size: usize,
+    max_buffer_wait: Duration,
 }
 
 pub fn strip_emoji_chars(text: &str) -> String {
@@ -142,6 +146,7 @@ impl TtsTask {
         let mut ptimer = tokio::time::interval(self.ptime);
         // samples buffer, emit all even if it was not fully filled
         let mut samples = vec![0u8; capacity];
+        let mut last_chunk_recv_time = Instant::now();
         // loop until cancelled
         loop {
             tokio::select! {
@@ -177,12 +182,39 @@ impl TtsTask {
                 _ = ptimer.tick() => {
                     samples.fill(0);
                     let mut i = 0;
-                    // fill samples until it's full or there are no more chunks to emit or current seq is not finished
-                    while i < capacity && !self.emit_q.is_empty(){
-                        // first entry is cur_seq
-                        let first_entry = &mut self.emit_q[0];
 
-                        // process each chunks
+                    // Jitter Buffer Logic
+                    let total_buffered_bytes: usize = self.emit_q.iter()
+                        .map(|e| e.chunks.iter().map(|c| c.len()).sum::<usize>())
+                        .sum();
+
+                    if let Some(start) = self.buffering_state {
+                        let elapsed = start.elapsed();
+                        // Check if the current processing entry is already marked as finished (no more data coming)
+                        let current_entry_finished = self.emit_q.front().map(|e| e.finished).unwrap_or(false);
+
+                        if total_buffered_bytes >= self.min_buffer_size
+                            || elapsed >= self.max_buffer_wait
+                            || (cmd_finished && tts_finished)
+                            || current_entry_finished
+                        {
+                            if total_buffered_bytes > 0 {
+                                debug!(
+                                    session_id = %self.session_id,
+                                    track_id = %self.track_id,
+                                    play_id = ?self.play_id,
+                                    cur_seq = self.cur_seq,
+                                    buffered_bytes = total_buffered_bytes,
+                                    elapsed_ms = elapsed.as_millis(),
+                                    "tts jitter buffer released"
+                                );
+                            }
+                            self.buffering_state = None;
+                        }
+                    }
+
+                    while self.buffering_state.is_none() && i < capacity && !self.emit_q.is_empty(){
+                        let first_entry = &mut self.emit_q[0];
                         while i < capacity && !first_entry.chunks.is_empty() {
                             let first_chunk = &mut first_entry.chunks[0];
                             let remaining = capacity - i;
@@ -200,11 +232,46 @@ impl TtsTask {
                         }
 
                         if first_entry.chunks.is_empty(){
-                            let elapsed = first_entry.finish_at.elapsed();
-                            // In streaming mode, finish when:
-                            // 1. cmd_finished is true (end_of_stream received)
-                            // 2. AND either tts_finished, or 10s timeout
-                            // Note: first_entry.finished is ignored here because some providers emit Finished per sentence
+                            // finish_at is estimated duration, it may be later than now
+                            let elapsed = if first_entry.finish_at <= Instant::now() {
+                                first_entry.finish_at.elapsed()
+                            } else {
+                                Duration::new(0, 0)
+                            };
+
+                            if !first_entry.finished {
+                                let elapsed_ms = elapsed.as_millis();
+                                if elapsed_ms > 100 {
+                                     // Underrun detection
+                                    if elapsed_ms > 200 && last_chunk_recv_time.elapsed().as_millis() > 500 {
+                                        if elapsed_ms % 500 < 50 {
+                                            warn!(
+                                                    session_id = %self.session_id,
+                                                    track_id = %self.track_id,
+                                                    play_id = ?self.play_id,
+                                                    cur_seq = self.cur_seq,
+                                                    elapsed_ms,
+                                                    stall_duration_ms = last_chunk_recv_time.elapsed().as_millis(),
+                                                    "tts playback stalled: waiting for more chunks (potential silence)"
+                                                );
+                                        }
+                                    } else if elapsed_ms % 500 < 50 {
+                                        info!(
+                                            session_id = %self.session_id,
+                                            track_id = %self.track_id,
+                                            play_id = ?self.play_id,
+                                            cur_seq = self.cur_seq,
+                                            elapsed_ms,
+                                            "tts buffer underrun: waiting for more chunks"
+                                        );
+                                    }
+                                }
+                                if self.buffering_state.is_none() {
+                                    self.buffering_state = Some(Instant::now());
+                                    // Stop consuming for this tick
+                                    break;
+                                }
+                            }
                             if self.streaming && cmd_finished && (tts_finished || elapsed > Duration::from_secs(10)) {
                                 debug!(
                                     session_id = %self.session_id,
@@ -297,8 +364,11 @@ impl TtsTask {
                         break;
                     }
                 }
-                cmd = self.command_rx.recv(), if !cmd_finished => {
-                    if let Some(cmd) = cmd.as_ref() {
+                mut cmd = self.command_rx.recv(), if !cmd_finished => {
+                    if let Some(cmd) = cmd.as_mut() {
+                        if cmd.option.session_id.is_none() {
+                            cmd.option.session_id = Some(self.session_id.clone());
+                        }
                         self.handle_cmd(cmd, cmd_seq).await;
                         cmd_seq.as_mut().map(|seq| *seq += 1);
                     }
@@ -319,7 +389,9 @@ impl TtsTask {
                 }
                 item = stream.next(), if !tts_finished => {
                     if let Some((cmd_seq, res)) = item {
-                        self.handle_event(cmd_seq, res).await
+                        if self.handle_event(cmd_seq, res).await {
+                             last_chunk_recv_time = Instant::now();
+                        }
                     }else{
                         debug!(
                             session_id = %self.session_id,
@@ -536,10 +608,15 @@ impl TtsTask {
         false
     }
 
-    async fn handle_event(&mut self, cmd_seq: Option<usize>, event: Result<SynthesisEvent>) {
+    async fn handle_event(
+        &mut self,
+        cmd_seq: Option<usize>,
+        event: Result<SynthesisEvent>,
+    ) -> bool {
         let assume_seq = cmd_seq.unwrap_or(0);
         match event {
             Ok(SynthesisEvent::AudioChunk(mut chunk)) => {
+                let recv_len = chunk.len();
                 let entry = self.metadatas.entry(assume_seq).or_default();
 
                 if entry.first_chunk {
@@ -566,6 +643,7 @@ impl TtsTask {
                     entry.chunks.push_back(chunk.clone());
                     entry.finish_at += duration;
                 });
+                return recv_len > 0;
             }
             Ok(SynthesisEvent::Subtitles(subtitles)) => {
                 self.metadatas.get_mut(&assume_seq).map(|entry| {
@@ -606,7 +684,7 @@ impl TtsTask {
                 if self.streaming {
                     self.get_emit_entry_mut(assume_seq)
                         .map(|entry| entry.finished = true);
-                    return;
+                    return false;
                 }
 
                 // if cache is enabled, cache key set by handle_cache
@@ -666,6 +744,7 @@ impl TtsTask {
                     .map(|entry| entry.finished = true);
             }
         }
+        false
     }
 
     // get mutable reference of result at cmd_seq, resize if needed, update the last_update
@@ -737,6 +816,8 @@ pub struct TtsTrack {
     client: Mutex<Option<Box<dyn SynthesisClient>>>,
     ssrc: u32,
     graceful: Arc<AtomicBool>,
+    min_buffer_duration: Duration,
+    max_buffer_wait: Duration,
 }
 
 impl SynthesisHandle {
@@ -782,6 +863,8 @@ impl TtsTrack {
             client: Mutex::new(Some(client)),
             graceful: Arc::new(AtomicBool::new(false)),
             ssrc: 0,
+            min_buffer_duration: Duration::from_millis(200), // Default 200ms
+            max_buffer_wait: Duration::from_millis(500),     // Default 500ms
         }
     }
     pub fn with_ssrc(mut self, ssrc: u32) -> Self {
@@ -811,6 +894,12 @@ impl TtsTrack {
 
     pub fn with_cache_enabled(mut self, use_cache: bool) -> Self {
         self.use_cache = use_cache;
+        self
+    }
+
+    pub fn with_jitter_buffer(mut self, min: Duration, max: Duration) -> Self {
+        self.min_buffer_duration = min;
+        self.max_buffer_wait = max;
         self
     }
 }
@@ -875,6 +964,12 @@ impl Track for TtsTrack {
             streaming: self.streaming,
             graceful: self.graceful.clone(),
             ssrc: self.ssrc,
+            buffering_state: Some(Instant::now()),
+            min_buffer_size: (self.config.samplerate as usize
+                * 2
+                * self.min_buffer_duration.as_millis() as usize)
+                / 1000,
+            max_buffer_wait: self.max_buffer_wait,
         };
         debug!(
             session_id = %self.session_id,
@@ -903,5 +998,416 @@ impl Track for TtsTrack {
 
     async fn send_packet(&mut self, _packet: &AudioFrame) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::synthesis::SynthesisType;
+    use futures::stream::BoxStream;
+    use tokio::sync::{broadcast, mpsc};
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    struct MockClient {
+        stream_rx: Option<mpsc::UnboundedReceiver<(Option<usize>, Result<SynthesisEvent>)>>,
+    }
+
+    impl MockClient {
+        fn new(rx: mpsc::UnboundedReceiver<(Option<usize>, Result<SynthesisEvent>)>) -> Self {
+            Self {
+                stream_rx: Some(rx),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SynthesisClient for MockClient {
+        fn provider(&self) -> SynthesisType {
+            SynthesisType::Other("test".to_string())
+        }
+        async fn start(
+            &mut self,
+        ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
+            let rx = self.stream_rx.take().unwrap();
+            Ok(UnboundedReceiverStream::new(rx).boxed())
+        }
+        async fn synthesize(
+            &mut self,
+            _text: &str,
+            _cmd_seq: Option<usize>,
+            _option: Option<crate::synthesis::SynthesisOption>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jitter_buffer() {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel(); // Fixed: Unbounded
+        let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
+        let (session_event_tx, _session_event_rx) = broadcast::channel(10); // Fixed: Broadcast
+
+        let client = Box::new(MockClient::new(event_rx));
+        let cancel_token = CancellationToken::new();
+
+        let sample_rate = 8000;
+        let ptime = Duration::from_millis(20);
+        let _min_buffer_duration = Duration::from_millis(200);
+        // 200ms at 8000Hz (16bit) = 3200 bytes
+        let min_buffer_size = (sample_rate as usize * 2 * 200) / 1000;
+
+        let task = TtsTask {
+            play_id: Some("test".to_string()),
+            track_id: "track1".to_string(),
+            session_id: "session1".to_string(),
+            client,
+            command_rx: cmd_rx,
+            event_sender: session_event_tx,
+            packet_sender: packet_tx,
+            cancel_token: cancel_token.clone(),
+            processor_chain: ProcessorChain::new(sample_rate),
+            cache_enabled: false,
+            sample_rate,
+            ptime,
+            cache_buffer: BytesMut::new(),
+            emit_q: VecDeque::new(),
+            metadatas: HashMap::new(),
+            cur_seq: 0,
+            streaming: true,
+            graceful: Arc::new(AtomicBool::new(false)),
+            ssrc: 1234,
+            buffering_state: Some(Instant::now()),
+            min_buffer_size,
+            max_buffer_wait: Duration::from_secs(10),
+        };
+
+        tokio::spawn(async move {
+            task.run().await.unwrap();
+        });
+
+        // 1. Initial state: buffering.
+        let frame = packet_rx.recv().await.unwrap();
+        match frame.samples {
+            Samples::Empty => {}
+            Samples::PCM { ref samples } => assert!(samples.len() == 0),
+            _ => panic!("Unexpected sample type"),
+        }
+
+        // 2. Send 1 chunk (1000 bytes, ~62ms).
+        let chunk = Bytes::from(vec![0u8; 1000]);
+        event_tx
+            .send((None, Ok(SynthesisEvent::AudioChunk(chunk))))
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drain rx a bit, should still be empty
+        while let Ok(frame) = packet_rx.try_recv() {
+            match frame.samples {
+                Samples::Empty => {}
+                Samples::PCM { ref samples } => assert!(samples.len() == 0),
+                _ => panic!("Unexpected sample type while buffering"),
+            }
+        }
+
+        // 3. Send enough data to cross 200ms threshold.
+        // Need > 2200 bytes more.
+        let chunk2 = Bytes::from(vec![1u8; 3000]);
+        event_tx
+            .send((None, Ok(SynthesisEvent::AudioChunk(chunk2))))
+            .unwrap();
+
+        // Wait for audio
+        let mut received_audio = false;
+        let timeout = tokio::time::sleep(Duration::from_millis(1000));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(frame) = packet_rx.recv() => {
+                    match frame.samples {
+                        Samples::PCM { samples } if samples.len() > 0 => {
+                            received_audio = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                _ = &mut timeout => {
+                    break;
+                }
+            }
+        }
+        assert!(
+            received_audio,
+            "Should have received audio after buffer full"
+        );
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_jitter_buffer_bypass() {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
+        let (session_event_tx, _session_event_rx) = broadcast::channel(10);
+
+        let client = Box::new(MockClient::new(event_rx));
+        let cancel_token = CancellationToken::new();
+
+        let sample_rate = 8000;
+        let ptime = Duration::from_millis(20);
+        // Min buffer ~ 3200 bytes
+        let min_buffer_size = (sample_rate as usize * 2 * 200) / 1000;
+
+        let task = TtsTask {
+            play_id: Some("test_bypass".to_string()),
+            track_id: "track_bypass".to_string(),
+            session_id: "session_bypass".to_string(),
+            client,
+            command_rx: cmd_rx,
+            event_sender: session_event_tx,
+            packet_sender: packet_tx,
+            cancel_token: cancel_token.clone(),
+            processor_chain: ProcessorChain::new(sample_rate),
+            cache_enabled: false,
+            sample_rate,
+            ptime,
+            cache_buffer: BytesMut::new(),
+            emit_q: VecDeque::new(),
+            metadatas: HashMap::new(),
+            cur_seq: 0,
+            streaming: true,
+            graceful: Arc::new(AtomicBool::new(false)),
+            ssrc: 5678,
+            buffering_state: Some(Instant::now()),
+            min_buffer_size,
+            max_buffer_wait: Duration::from_secs(10),
+        };
+
+        tokio::spawn(async move {
+            task.run().await.unwrap();
+        });
+
+        // 1. Send small chunk (1000 bytes) < threshold (3200)
+        let chunk = Bytes::from(vec![0u8; 1000]);
+        event_tx
+            .send((None, Ok(SynthesisEvent::AudioChunk(chunk))))
+            .unwrap();
+
+        // 2. Send Finished event immediately (simulating short phrase or end of stream)
+        // This sets 'finished' on the emit entry, which should trigger the bypass logic: "|| current_entry_finished"
+        event_tx.send((None, Ok(SynthesisEvent::Finished))).unwrap();
+
+        // 3. Expect audio to arrive immediately, NOT waiting for 3200 bytes or timeout
+        let timeout = tokio::time::sleep(Duration::from_millis(50)); // Expect very fast response
+        tokio::pin!(timeout);
+
+        let mut received = false;
+        loop {
+            tokio::select! {
+                Some(frame) = packet_rx.recv() => {
+                    if let Samples::PCM { samples } = frame.samples {
+                        if samples.len() > 0 {
+                            received = true;
+                            break;
+                        }
+                    }
+                }
+                _ = &mut timeout => break,
+            }
+        }
+
+        assert!(
+            received,
+            "Jitter buffer should release immediately on Finish event for short phrases"
+        );
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_jitter_buffer_multi_entry_underrun() {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
+        let (session_event_tx, _session_event_rx) = broadcast::channel(10);
+
+        let client = Box::new(MockClient::new(event_rx));
+        let cancel_token = CancellationToken::new();
+
+        let sample_rate = 8000;
+        let ptime = Duration::from_millis(20);
+        // Min buffer ~ 3200 bytes
+        let min_buffer_size = (sample_rate as usize * 2 * 200) / 1000;
+
+        let task = TtsTask {
+            play_id: Some("test_multi".to_string()),
+            track_id: "track_multi".to_string(),
+            session_id: "session_multi".to_string(),
+            client,
+            command_rx: cmd_rx,
+            event_sender: session_event_tx,
+            packet_sender: packet_tx,
+            cancel_token: cancel_token.clone(),
+            processor_chain: ProcessorChain::new(sample_rate),
+            cache_enabled: false,
+            sample_rate,
+            ptime,
+            cache_buffer: BytesMut::new(),
+            emit_q: VecDeque::new(),
+            metadatas: HashMap::new(),
+            cur_seq: 0,
+            streaming: true,
+            graceful: Arc::new(AtomicBool::new(false)),
+            ssrc: 9999,
+            buffering_state: Some(Instant::now()),
+            min_buffer_size,
+            max_buffer_wait: Duration::from_secs(10),
+        };
+
+        tokio::spawn(async move {
+            task.run().await.unwrap();
+        });
+
+        // 1. Entry 0: Send some data, but NOT finished
+        // sequence 0 audio
+        let chunk0 = Bytes::from(vec![1u8; 1000]);
+        event_tx
+            .send((Some(0), Ok(SynthesisEvent::AudioChunk(chunk0))))
+            .unwrap();
+
+        // 2. Entry 1: Send a LOT of data (enough to trigger buffer release)
+        // sequence 1 audio - simulating next sentence arriving
+        let chunk1 = Bytes::from(vec![2u8; 4000]);
+        event_tx
+            .send((Some(1), Ok(SynthesisEvent::AudioChunk(chunk1))))
+            .unwrap();
+
+        // 3. The total buffer is 5000 > 3200. It SHOULD play.
+        // However, if the bug exists:
+        // - It will play Entry 0 (1000 bytes)
+        // - Entry 0 runs out. Entry 0 is NOT finished.
+        // - It detects "Underrun" on Entry 0.
+        // - It goes back to buffering.
+        // - Next tick, it sees total buffer (4000 bytes from Entry 1) > threshold.
+        // - It releases buffer.
+        // - It tries to play Entry 0 again. Still empty.
+        // - Underrun again.
+        // -> DEADLOCK loop. Entry 1 never gets played.
+
+        let timeout = tokio::time::sleep(Duration::from_millis(500));
+        tokio::pin!(timeout);
+
+        let mut received_bytes = 0;
+        loop {
+            tokio::select! {
+                Some(frame) = packet_rx.recv() => {
+                    if let Samples::PCM { samples } = frame.samples {
+                        received_bytes += samples.len() * 2; // 16bit
+                    }
+                }
+                _ = &mut timeout => break,
+            }
+        }
+
+        // Ideally we should receive everything (5000 bytes) or at least progress to seq 1
+        // If bug exists, we might only get chunk0 (1000 bytes) and then get stuck.
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_jitter_buffer_streaming_append() {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
+        let (session_event_tx, _session_event_rx) = broadcast::channel(10);
+
+        let client = Box::new(MockClient::new(event_rx));
+        let cancel_token = CancellationToken::new();
+
+        let sample_rate = 8000;
+        let ptime = Duration::from_millis(20);
+        let min_buffer_size = (sample_rate as usize * 2 * 200) / 1000; // ~320 bytes
+
+        let task = TtsTask {
+            play_id: Some("test_stream".to_string()),
+            track_id: "track_stream".to_string(),
+            session_id: "session_stream".to_string(),
+            client,
+            command_rx: cmd_rx,
+            event_sender: session_event_tx,
+            packet_sender: packet_tx,
+            cancel_token: cancel_token.clone(),
+            processor_chain: ProcessorChain::new(sample_rate),
+            cache_enabled: false,
+            sample_rate,
+            ptime,
+            cache_buffer: BytesMut::new(),
+            emit_q: VecDeque::new(),
+            metadatas: HashMap::new(),
+            cur_seq: 0,
+            streaming: true,
+            graceful: Arc::new(AtomicBool::new(false)),
+            ssrc: 1111,
+            buffering_state: Some(Instant::now()),
+            min_buffer_size,
+            max_buffer_wait: Duration::from_secs(10),
+        };
+
+        tokio::spawn(async move {
+            task.run().await.unwrap();
+        });
+
+        // 1. Send Batch 1 (1000 bytes)
+        event_tx
+            .send((
+                None,
+                Ok(SynthesisEvent::AudioChunk(Bytes::from(vec![1u8; 1000]))),
+            ))
+            .unwrap();
+
+        // 2. Mark Finished (Simulating first sentence complete)
+        event_tx.send((None, Ok(SynthesisEvent::Finished))).unwrap();
+
+        // 3. Send Batch 2 (4000 bytes) - Arriving AFTER finish
+        // This simulates second sentence arriving in the same stream (Entry 0)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        event_tx
+            .send((
+                None,
+                Ok(SynthesisEvent::AudioChunk(Bytes::from(vec![2u8; 4000]))),
+            ))
+            .unwrap();
+
+        let timeout = tokio::time::sleep(Duration::from_millis(1000));
+        tokio::pin!(timeout);
+
+        let mut received_bytes = 0;
+        loop {
+            tokio::select! {
+                Some(frame) = packet_rx.recv() => {
+                    if let Samples::PCM { samples } = frame.samples {
+                        received_bytes += samples.len() * 2;
+                    }
+                }
+                _ = &mut timeout => break,
+            }
+        }
+
+        // We expect ALL 5000 bytes to be played.
+        println!("Received bytes: {}", received_bytes);
+        assert!(
+            received_bytes > 4000,
+            "Should play appended data even after Finished event. Received: {}",
+            received_bytes
+        );
+
+        cancel_token.cancel();
     }
 }

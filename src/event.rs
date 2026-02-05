@@ -4,7 +4,6 @@ use serde_with::skip_serializing_none;
 use std::{collections::HashMap, fmt::Display};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event")]
 #[serde(rename_all = "camelCase")]
 pub struct Attendee {
     pub username: String,
