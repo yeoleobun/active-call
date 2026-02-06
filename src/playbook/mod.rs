@@ -6,6 +6,7 @@ use crate::{EouOption, RealtimeOption, SipOption, media::ambiance::AmbianceOptio
 use anyhow::{Result, anyhow};
 use minijinja::Environment;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{collections::HashMap, path::Path};
 use tokio::fs;
 
@@ -15,7 +16,8 @@ fn expand_env_vars(input: &str) -> String {
     re.replace_all(input, |caps: &regex::Captures| {
         let var_name = &caps[1];
         std::env::var(var_name).unwrap_or_else(|_| format!("${{{}}}", var_name))
-    }).to_string()
+    })
+    .to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq)]
@@ -166,7 +168,27 @@ impl Playbook {
     ) -> Result<Self> {
         let rendered_content = if let Some(vars) = variables {
             let env = Environment::new();
-            env.render_str(content, vars)?
+            let mut context = vars.clone();
+
+            // Get the list of SIP header keys stored by extract_headers processing
+            // If not present, sip dict will be empty (no headers were configured for extraction)
+            let sip_header_keys: Vec<String> = vars
+                .get("_sip_header_keys")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            // Separate SIP headers into sip dictionary based on stored keys
+            let mut sip_headers = HashMap::new();
+            for key in &sip_header_keys {
+                if let Some(value) = vars.get(key) {
+                    sip_headers.insert(key.clone(), value.clone());
+                }
+            }
+            context.insert(
+                "sip".to_string(),
+                serde_json::to_value(&sip_headers).unwrap_or(Value::Null),
+            );
+            env.render_str(content, &context)?
         } else {
             content.to_string()
         };
@@ -478,7 +500,7 @@ Hello
             std::env::set_var("TEST_API_KEY", "sk-test-12345");
             std::env::set_var("TEST_BASE_URL", "https://api.test.com");
         }
-        
+
         let content = r#"---
 llm:
   provider: openai
@@ -491,11 +513,11 @@ Test
 "#;
         let playbook = Playbook::parse(content, None).unwrap();
         let llm = playbook.config.llm.unwrap();
-        
+
         assert_eq!(llm.api_key.unwrap(), "sk-test-12345");
         assert_eq!(llm.base_url.unwrap(), "https://api.test.com");
         assert_eq!(llm.model.unwrap(), "gpt-4");
-        
+
         // Clean up
         unsafe {
             std::env::remove_var("TEST_API_KEY");
@@ -516,7 +538,7 @@ Test
 "#;
         let playbook = Playbook::parse(content, None).unwrap();
         let llm = playbook.config.llm.unwrap();
-        
+
         // Should keep the placeholder if env var not found
         assert_eq!(llm.api_key.unwrap(), "${UNDEFINED_VAR}");
     }
@@ -539,6 +561,137 @@ Hello
             SummaryType::Custom(s) => assert_eq!(s, "Please summarize customly"),
             _ => panic!("Expected Custom summary type"),
         }
+    }
+
+    #[test]
+    fn test_sip_dict_access_with_hyphens() {
+        // Test accessing SIP headers with hyphens via sip dictionary
+        let content = r#"---
+llm:
+  provider: openai
+  greeting: Hello {{ sip["X-Customer-Name"] }}!
+---
+# Scene: main
+Your ID is {{ sip["X-Customer-ID"] }}.
+Session type: {{ sip["X-Session-Type"] }}.
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("X-Customer-Name".to_string(), json!("Alice"));
+        variables.insert("X-Customer-ID".to_string(), json!("CID-12345"));
+        variables.insert("X-Session-Type".to_string(), json!("inbound"));
+        // Simulate extract_headers processing
+        variables.insert(
+            "_sip_header_keys".to_string(),
+            json!(["X-Customer-Name", "X-Customer-ID", "X-Session-Type"]),
+        );
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+
+        assert_eq!(
+            playbook.config.llm.as_ref().unwrap().greeting,
+            Some("Hello Alice!".to_string())
+        );
+
+        let scene = playbook.scenes.get("main").unwrap();
+        assert_eq!(
+            scene.prompt,
+            "Your ID is CID-12345.\nSession type: inbound."
+        );
+    }
+
+    #[test]
+    fn test_sip_dict_only_contains_sip_headers() {
+        // Test that sip dict only contains SIP headers from extract_headers, not other variables
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+SIP Header: {{ sip["X-Custom-Header"] }}
+Regular var: {{ regular_var }}
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("X-Custom-Header".to_string(), json!("header_value"));
+        variables.insert("regular_var".to_string(), json!("regular_value"));
+        variables.insert("another_var".to_string(), json!("another"));
+        // Only X-Custom-Header is extracted
+        variables.insert("_sip_header_keys".to_string(), json!(["X-Custom-Header"]));
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+        let scene = playbook.scenes.get("main").unwrap();
+
+        // Both should work - SIP header via sip dict, regular var via direct access
+        assert!(scene.prompt.contains("SIP Header: header_value"));
+        assert!(scene.prompt.contains("Regular var: regular_value"));
+    }
+
+    #[test]
+    fn test_sip_dict_mixed_access() {
+        // Test that both direct access and sip dict access work together
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+Direct: {{ simple_var }}
+SIP Header: {{ sip["X-Custom-Header"] }}
+SIP via Direct: {{ X_Custom_Header2 }}
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("simple_var".to_string(), json!("direct_value"));
+        variables.insert("X-Custom-Header".to_string(), json!("header_value"));
+        variables.insert("X_Custom_Header2".to_string(), json!("header2_value"));
+        // Only X-Custom-Header is in extract_headers
+        variables.insert("_sip_header_keys".to_string(), json!(["X-Custom-Header"]));
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+        let scene = playbook.scenes.get("main").unwrap();
+
+        assert!(scene.prompt.contains("Direct: direct_value"));
+        assert!(scene.prompt.contains("SIP Header: header_value"));
+        // X_Custom_Header2 doesn't start with X-, so won't be in sip dict
+        assert!(scene.prompt.contains("SIP via Direct: header2_value"));
+    }
+
+    #[test]
+    fn test_sip_dict_empty_context() {
+        // Test that sip dict works with no variables
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+No variables here.
+"#;
+        let playbook = Playbook::parse(content, None).unwrap();
+        let scene = playbook.scenes.get("main").unwrap();
+        assert_eq!(scene.prompt, "No variables here.");
+    }
+
+    #[test]
+    fn test_sip_dict_case_insensitive() {
+        // Test that extract_headers can include headers with different cases
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+Upper: {{ sip["X-Header-Upper"] }}
+Lower: {{ sip["x-header-lower"] }}
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("X-Header-Upper".to_string(), json!("UPPER"));
+        variables.insert("x-header-lower".to_string(), json!("lower"));
+        variables.insert(
+            "_sip_header_keys".to_string(),
+            json!(["X-Header-Upper", "x-header-lower"]),
+        );
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+        let scene = playbook.scenes.get("main").unwrap();
+
+        assert!(scene.prompt.contains("Upper: UPPER"));
+        assert!(scene.prompt.contains("Lower: lower"));
     }
 
     #[test]
@@ -572,16 +725,16 @@ Test content
 "#;
 
         let playbook = Playbook::parse(content, None).unwrap();
-        
+
         // Verify ASR fields
         let asr = playbook.config.asr.unwrap();
         assert_eq!(asr.language.unwrap(), "zh");
-        
+
         // Verify TTS fields
         let tts = playbook.config.tts.unwrap();
         assert_eq!(tts.speaker.unwrap(), "F1");
         assert_eq!(tts.speed, Some(1.2));
-        
+
         // Verify LLM fields
         let llm = playbook.config.llm.unwrap();
         assert_eq!(llm.model.unwrap(), "gpt-4o");
@@ -596,5 +749,168 @@ Test content
             std::env::remove_var("TEST_LANGUAGE_ALL");
             std::env::remove_var("TEST_SPEED_ALL");
         }
+    }
+
+    #[test]
+    fn test_sip_dict_with_http_command() {
+        // Test that SIP headers work correctly in HTTP command URLs
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+Querying API: <http url='https://api.example.com/customers/{{ sip["X-Customer-ID"] }}' method="GET" />
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("X-Customer-ID".to_string(), json!("CUST12345"));
+        variables.insert("_sip_header_keys".to_string(), json!(["X-Customer-ID"]));
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+        let scene = playbook.scenes.get("main").unwrap();
+
+        // The HTTP tag should be preserved in the prompt with the variable expanded
+        assert!(
+            scene
+                .prompt
+                .contains("https://api.example.com/customers/CUST12345")
+        );
+    }
+
+    #[test]
+    fn test_sip_dict_without_extract_config() {
+        // Test that sip dict is empty when no _sip_header_keys is present
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+Regular var: {{ regular_var }}
+SIP dict should be empty.
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("regular_var".to_string(), json!("regular_value"));
+        // No _sip_header_keys, so sip dict should be empty
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+        let scene = playbook.scenes.get("main").unwrap();
+
+        assert!(scene.prompt.contains("Regular var: regular_value"));
+    }
+
+    #[test]
+    fn test_sip_dict_with_multiple_headers_in_yaml() {
+        // Test SIP headers used in YAML configuration section
+        let content = r#"---
+llm:
+  provider: openai
+  greeting: 'Welcome {{ sip["X-Customer-Name"] }}! Your ID is {{ sip["X-Customer-ID"] }}.'
+---
+# Scene: main
+How can I help you today?
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("X-Customer-Name".to_string(), json!("Alice"));
+        variables.insert("X-Customer-ID".to_string(), json!("CUST789"));
+        variables.insert(
+            "_sip_header_keys".to_string(),
+            json!(["X-Customer-Name", "X-Customer-ID"]),
+        );
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+
+        assert_eq!(
+            playbook.config.llm.as_ref().unwrap().greeting,
+            Some("Welcome Alice! Your ID is CUST789.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_wrong_syntax_should_fail() {
+        // Test that using {{ X-Header }} (without sip dict) should fail
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+This will fail: {{ X-Customer-ID }}
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("X-Customer-ID".to_string(), json!("CUST123"));
+        variables.insert("_sip_header_keys".to_string(), json!(["X-Customer-ID"]));
+
+        // This should fail because X-Customer-ID is not in the direct context
+        // It's only in sip dict
+        let result = Playbook::parse(content, Some(&variables));
+
+        // The parse should fail with a template error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sip_dict_with_set_var() {
+        // Test that SIP headers work in set_var commands
+        let content = r#"---
+llm:
+  provider: openai
+---
+# Scene: main
+<set_var key="X-Call-Status" value="active" />
+Customer: {{ sip["X-Customer-ID"] }}
+Status set successfully.
+"#;
+        let mut variables = HashMap::new();
+        variables.insert("X-Customer-ID".to_string(), json!("CUST456"));
+        variables.insert("_sip_header_keys".to_string(), json!(["X-Customer-ID"]));
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+        let scene = playbook.scenes.get("main").unwrap();
+
+        assert!(scene.prompt.contains("Customer: CUST456"));
+        assert!(scene.prompt.contains("<set_var"));
+    }
+
+    #[test]
+    fn test_sip_dict_mixed_with_regular_vars_in_complex_scenario() {
+        // Test complex scenario with both SIP headers and regular variables
+        let content = r#"---
+llm:
+  provider: openai
+  greeting: 'Hello {{ sip["X-Customer-Name"] }}, member level: {{ member_level }}'
+---
+# Scene: main
+Your ID: {{ sip["X-Customer-ID"] }}
+Your status: {{ account_status }}
+Your priority: {{ sip["X-Priority"] }}
+Order count: {{ order_count }}
+"#;
+        let mut variables = HashMap::new();
+        // SIP headers
+        variables.insert("X-Customer-Name".to_string(), json!("Bob"));
+        variables.insert("X-Customer-ID".to_string(), json!("CUST999"));
+        variables.insert("X-Priority".to_string(), json!("VIP"));
+        // Regular variables
+        variables.insert("member_level".to_string(), json!("Gold"));
+        variables.insert("account_status".to_string(), json!("Active"));
+        variables.insert("order_count".to_string(), json!(5));
+        // Mark SIP headers
+        variables.insert(
+            "_sip_header_keys".to_string(),
+            json!(["X-Customer-Name", "X-Customer-ID", "X-Priority"]),
+        );
+
+        let playbook = Playbook::parse(content, Some(&variables)).unwrap();
+
+        // Check greeting has both types
+        assert_eq!(
+            playbook.config.llm.as_ref().unwrap().greeting,
+            Some("Hello Bob, member level: Gold".to_string())
+        );
+
+        // Check scene has all variables correctly rendered
+        let scene = playbook.scenes.get("main").unwrap();
+        assert!(scene.prompt.contains("Your ID: CUST999"));
+        assert!(scene.prompt.contains("Your status: Active"));
+        assert!(scene.prompt.contains("Your priority: VIP"));
+        assert!(scene.prompt.contains("Order count: 5"));
     }
 }

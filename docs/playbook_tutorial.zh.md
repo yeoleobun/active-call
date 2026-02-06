@@ -175,4 +175,6 @@ posthook:
 1.  **短句原则**: 在提示词中要求 AI 使用短句，因为系统会按句子流式合成语音，句子越短响应越快。
 2.  **打断保护**: 如果 AI 说话很关键，可以在 Front Matter 中设置 `interruption.strategy: "none"` 临时禁止打断。
 3.  **转接兜底**: 在提供转接功能时，务必告知 AI 如果转接失败该如何安抚用户。
-4.  **变量注入**: Playbook 支持 Minijinja 模板语法，你可以在启动呼叫时动态注入变量，例如 `{{ user_name }}`。
+6.  **变量注入**: Playbook 支持 Minijinja 模板语法，你可以在启动呼叫时动态注入变量。
+    - 普通变量：`{{ user_name }}`
+    - SIP Headers（包含连字符）：`{{ sip["X-Customer-ID"] }}`（详见[高级特性文档](playbook_advanced_features.md)）

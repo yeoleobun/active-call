@@ -18,7 +18,8 @@ static RE_HANGUP: Lazy<Regex> = Lazy::new(|| Regex::new(r"<hangup\s*/>").unwrap(
 static RE_REFER: Lazy<Regex> = Lazy::new(|| Regex::new(r#"<refer\s+to="([^"]+)"\s*/>"#).unwrap());
 static RE_PLAY: Lazy<Regex> = Lazy::new(|| Regex::new(r#"<play\s+file="([^"]+)"\s*/>"#).unwrap());
 static RE_GOTO: Lazy<Regex> = Lazy::new(|| Regex::new(r#"<goto\s+scene="([^"]+)"\s*/>"#).unwrap());
-static RE_SET_VAR: Lazy<Regex> = Lazy::new(|| Regex::new(r#"<set_var\s+key="([^"]+)"\s+value=["'](.+?)["']\s*/>"#).unwrap());
+static RE_SET_VAR: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"<set_var\s+key="([^"]+)"\s+value=["'](.+?)["']\s*/>"#).unwrap());
 static RE_HTTP: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"<http\s+url="([^"]+)"(?:\s+method="([^"]+)")?(?:\s+body="([^"]+)")?\s*/>"#)
         .unwrap()
@@ -451,8 +452,9 @@ impl LlmHandler {
                     }
 
                     if checked_json_mode && !is_json_mode {
-                        let extracted =
-                            self.extract_streaming_commands(&mut buffer, &play_id, false).await;
+                        let extracted = self
+                            .extract_streaming_commands(&mut buffer, &play_id, false)
+                            .await;
                         for cmd in extracted {
                             if let Some(call) = &self.call {
                                 let _ = call.enqueue_command(cmd).await;
@@ -482,7 +484,9 @@ impl LlmHandler {
         if is_json_mode {
             self.interpret_response(full_content).await
         } else {
-            let extracted = self.extract_streaming_commands(&mut buffer, &play_id, true).await;
+            let extracted = self
+                .extract_streaming_commands(&mut buffer, &play_id, true)
+                .await;
             for cmd in extracted {
                 if let Some(call) = &self.call {
                     let _ = call.enqueue_command(cmd).await;
@@ -510,6 +514,7 @@ impl LlmHandler {
         is_final: bool,
     ) -> Vec<Command> {
         let mut commands = Vec::new();
+        let mut pending_hangup: Option<(String, usize)> = None; // Store hangup prefix and position
 
         loop {
             let hangup_pos = RE_HANGUP.find(buffer);
@@ -521,7 +526,7 @@ impl LlmHandler {
             let sentence_pos = RE_SENTENCE.find(buffer);
 
             // Find the first occurrence
-            let mut positions: Vec<(usize, CommandKind)> = Vec::new(); // ...existing code...
+            let mut positions: Vec<(usize, CommandKind)> = Vec::new();
             if let Some(m) = hangup_pos {
                 positions.push((m.start(), CommandKind::Hangup));
             }
@@ -574,95 +579,79 @@ impl LlmHandler {
                         buffer.drain(..mat.end());
                     }
                     CommandKind::Http => {
-                         let caps = RE_HTTP.captures(buffer).unwrap();
-                         let mat = caps.get(0).unwrap();
-                         let url = caps.get(1).unwrap().as_str().to_string();
-                         let method = caps.get(2).map(|m| m.as_str().to_string()).unwrap_or("GET".to_string());
-                         let body = caps.get(3).map(|m| m.as_str().to_string());
+                        let caps = RE_HTTP.captures(buffer).unwrap();
+                        let mat = caps.get(0).unwrap();
+                        let url = caps.get(1).unwrap().as_str().to_string();
+                        let method = caps
+                            .get(2)
+                            .map(|m| m.as_str().to_string())
+                            .unwrap_or("GET".to_string());
+                        let body = caps.get(3).map(|m| m.as_str().to_string());
 
-                         // Flush TTS
-                         let prefix = buffer[..pos].to_string();
-                         if !prefix.trim().is_empty() {
-                             commands.push(self.create_tts_command_with_id(
-                                 prefix,
-                                 play_id.to_string(),
-                                 None,
-                             ));
-                         }
-
-                         // Execute HTTP request synchronously and capture response
-                         let client = self.client.clone();
-                         let mut req = match method.to_uppercase().as_str() {
-                             "POST" => client.post(&url),
-                             "PUT" => client.put(&url),
-                             _ => client.get(&url),
-                         };
-
-                         if let Some(b) = body {
-                             req = req.body(b);
-                         }
-
-                         // Send request and wait for response
-                         match req.send().await {
-                             Ok(res) => {
-                                 let status = res.status();
-                                 let text = res.text().await.unwrap_or_default();
-                                 info!(url, method, status=?status, "HTTP command executed from stream");
-                                 
-                                 // Add response to history for LLM context
-                                 self.history.push(ChatMessage {
-                                     role: "system".to_string(),
-                                     content: format!("HTTP {} {} returned ({}): {}", method, url, status, text),
-                                 });
-                             }
-                             Err(e) => {
-                                 warn!(url, method, "Failed to execute HTTP command from stream: {}", e);
-                                 
-                                 // Add error to history
-                                 self.history.push(ChatMessage {
-                                     role: "system".to_string(),
-                                     content: format!("HTTP {} {} failed: {}", method, url, e),
-                                 });
-                             }
-                         }
-
-                         buffer.drain(..mat.end());
-                    }
-                    CommandKind::Hangup => {
+                        // Flush TTS
                         let prefix = buffer[..pos].to_string();
                         if !prefix.trim().is_empty() {
-                            let mut cmd = self.create_tts_command_with_id(
+                            commands.push(self.create_tts_command_with_id(
                                 prefix,
                                 play_id.to_string(),
-                                Some(true),
-                            );
-                            if let Command::Tts { end_of_stream, .. } = &mut cmd {
-                                *end_of_stream = Some(true);
-                            }
-                            self.is_hanging_up = true;
-                            commands.push(cmd);
-                        } else {
-                            let mut cmd = self.create_tts_command_with_id(
-                                "".to_string(),
-                                play_id.to_string(),
-                                Some(true),
-                            );
-                            if let Command::Tts { end_of_stream, .. } = &mut cmd {
-                                *end_of_stream = Some(true);
-                            }
-                            self.is_hanging_up = true;
-                            commands.push(cmd);
+                                None,
+                            ));
                         }
 
-                        let headers = self.render_sip_headers().await;
-                        commands.push(Command::Hangup {
-                            reason: Some("AI Hangup".to_string()),
-                            initiator: Some("ai".to_string()),
-                            headers,
-                        });
+                        // Execute HTTP request synchronously and capture response
+                        let client = self.client.clone();
+                        let mut req = match method.to_uppercase().as_str() {
+                            "POST" => client.post(&url),
+                            "PUT" => client.put(&url),
+                            _ => client.get(&url),
+                        };
 
-                        buffer.drain(..RE_HANGUP.find(buffer).unwrap().end());
-                        return commands;
+                        if let Some(b) = body {
+                            req = req.body(b);
+                        }
+
+                        // Send request and wait for response
+                        match req.send().await {
+                            Ok(res) => {
+                                let status = res.status();
+                                let text = res.text().await.unwrap_or_default();
+                                info!(url, method, status=?status, "HTTP command executed from stream");
+
+                                // Add response to history for LLM context
+                                self.history.push(ChatMessage {
+                                    role: "system".to_string(),
+                                    content: format!(
+                                        "HTTP {} {} returned ({}): {}",
+                                        method, url, status, text
+                                    ),
+                                });
+                            }
+                            Err(e) => {
+                                warn!(
+                                    url,
+                                    method, "Failed to execute HTTP command from stream: {}", e
+                                );
+
+                                // Add error to history
+                                self.history.push(ChatMessage {
+                                    role: "system".to_string(),
+                                    content: format!("HTTP {} {} failed: {}", method, url, e),
+                                });
+                            }
+                        }
+
+                        buffer.drain(..mat.end());
+                    }
+                    CommandKind::Hangup => {
+                        // Don't execute hangup immediately, store it for later
+                        // This allows set_var commands after hangup to still be processed
+                        let prefix = buffer[..pos].to_string();
+                        let hangup_match = RE_HANGUP.find(buffer).unwrap();
+                        pending_hangup = Some((prefix, hangup_match.end()));
+                        buffer.drain(..hangup_match.end());
+
+                        // Continue processing remaining buffer for set_var commands
+                        // Don't return yet!
                     }
                     CommandKind::Refer => {
                         let caps = RE_REFER.captures(buffer).unwrap();
@@ -757,6 +746,39 @@ impl LlmHandler {
             }
         }
 
+        // Process pending hangup after all other commands (especially set_var)
+        if let Some((prefix, _)) = pending_hangup {
+            if !prefix.trim().is_empty() {
+                let mut cmd =
+                    self.create_tts_command_with_id(prefix, play_id.to_string(), Some(true));
+                if let Command::Tts { end_of_stream, .. } = &mut cmd {
+                    *end_of_stream = Some(true);
+                }
+                self.is_hanging_up = true;
+                commands.push(cmd);
+            } else {
+                let mut cmd = self.create_tts_command_with_id(
+                    "".to_string(),
+                    play_id.to_string(),
+                    Some(true),
+                );
+                if let Command::Tts { end_of_stream, .. } = &mut cmd {
+                    *end_of_stream = Some(true);
+                }
+                self.is_hanging_up = true;
+                commands.push(cmd);
+            }
+
+            let headers = self.render_sip_headers().await;
+            commands.push(Command::Hangup {
+                reason: Some("AI Hangup".to_string()),
+                initiator: Some("ai".to_string()),
+                headers,
+            });
+
+            return commands;
+        }
+
         if is_final {
             let remaining = buffer.trim().to_string();
             if !remaining.is_empty() {
@@ -831,7 +853,7 @@ impl LlmHandler {
                         }
                     }),
                 );
-                
+
                 let headers = self.render_sip_headers().await;
 
                 tool_commands.push(Command::Hangup {
@@ -912,22 +934,47 @@ impl LlmHandler {
         let hangup_template = self.sip_config.as_ref()?.hangup_headers.as_ref()?;
         let call = self.call.as_ref()?;
         let state = call.call_state.read().await;
-        
+
         let mut context = HashMap::new();
+        let mut sip_headers = HashMap::new();
+
+        // Get the list of SIP header keys stored during extraction
+        // If not present, sip dict will be empty (no headers were configured for extraction)
+        let sip_header_keys: Vec<String> = state
+            .extras
+            .as_ref()
+            .and_then(|e| e.get("_sip_header_keys"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
         if let Some(extras) = &state.extras {
             for (k, v) in extras {
+                // Skip internal keys
+                if k.starts_with('_') {
+                    continue;
+                }
                 context.insert(k.clone(), v.clone());
+                // Only include keys that were extracted as SIP headers
+                if sip_header_keys.contains(k) {
+                    sip_headers.insert(k.clone(), v.clone());
+                }
             }
         }
-        
+
+        // Add sip dictionary for template access
+        context.insert(
+            "sip".to_string(),
+            serde_json::to_value(&sip_headers).unwrap_or(serde_json::Value::Null),
+        );
+
         let env = minijinja::Environment::new();
         let mut rendered_headers = HashMap::new();
         for (k, v) in hangup_template {
-             if let Ok(rendered) = env.render_str(v, &context) {
-                 rendered_headers.insert(k.clone(), rendered);
-             } else {
-                 rendered_headers.insert(k.clone(), v.clone());
-             }
+            if let Ok(rendered) = env.render_str(v, &context) {
+                rendered_headers.insert(k.clone(), rendered);
+            } else {
+                rendered_headers.insert(k.clone(), v.clone());
+            }
         }
         Some(rendered_headers)
     }

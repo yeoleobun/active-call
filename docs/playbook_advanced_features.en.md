@@ -128,23 +128,65 @@ llm:
 
 ### 2. Use in Playbook
 
-Extracted headers are automatically injected into the Playbook's variable context, accessible via Jinja2 syntax:
+Extracted Headers are automatically injected into the Playbook's variable context. Since Header names typically contain hyphens (like `X-Customer-ID`), and Jinja2 interprets hyphens as subtraction operators, you must use **dictionary access syntax**:
 
 ```markdown
-Hello! Your customer ID is {{ X-CID }}.
-Session type: {{ X-Session-Type }}.
+Hello! Your customer ID is {{ sip["X-CID"] }}.
+Session type: {{ sip["X-Session-Type"] }}.
 ```
+
+**Key Points**:
+- ✅ **Recommended**: `{{ sip["X-Header-Name"] }}` - Use `sip` dictionary access for variables with hyphens
+- ❌ **Wrong**: `{{ X-Header-Name }}` - Will be parsed as `X minus Header minus Name`, causing errors
+- 📋 **sip Dictionary Scope**: Contains only SIP Headers (variables starting with `X-` or `x-`)
+- ✅ **Regular Variables**: For variables without hyphens (like `customer_id`), you can use `{{ customer_id }}` directly
 
 ### 3. LLM Access
 
-LLM can access these variables through system messages (auto-injected to context):
+LLM can access these variables through system messages (automatically injected into context):
 
 ```
-User: What's my ID number?
-LLM: According to our records, your customer ID is {{ X-CID }}.
+User: What's my customer ID?
+LLM: According to our records, your customer ID is {{ sip["X-CID"] }}.
 ```
 
-### 4. Advanced: Regex Validation
+### 4. Using set_var to Update SIP Headers
+
+During conversation, LLM can use `<set_var>` to dynamically set or update individual SIP Headers:
+
+```markdown
+LLM: Your ticket has been created <set_var key="X-Ticket-ID" value="TKT-12345" />
+LLM: Call rating is excellent <set_var key="X-Call-Rating" value="excellent" />
+```
+
+These set headers will:
+- Be immediately written to `ActiveCall.extras`
+- Be available in `render_sip_headers` for BYE requests
+- Be referenceable in subsequent templates
+
+### 5. BYE Headers Rendering
+
+At hangup, you can configure `hangup_headers` templates that access all variables (including both SIP headers and regular variables):
+
+```yaml
+---
+sip:
+  extract_headers:
+    - "X-Customer-ID"
+  hangup_headers:
+    X-Call-Result: "{{ call_result }}"          # Regular variable
+    X-Customer: "{{ sip[\"X-Customer-ID\"] }}"     # SIP Header
+    X-Agent: "{{ agent_name }}"                  # Regular variable
+---
+```
+
+Set variables during conversation:
+```markdown
+<set_var key="call_result" value="successful" />
+<set_var key="agent_name" value="Alice" />
+```
+
+### 6. Advanced: Regex Validation
 
 Use regex patterns to validate and extract specific formats:
 
@@ -266,7 +308,7 @@ The `<http>` tag enables LLM to call external APIs for:
 
 Let me check your account information...
 
-<http url="https://api.example.com/customers/{{X-CID}}" method="GET" />
+<http url="https://api.example.com/customers/{{ sip[\"X-CID\"] }}" method="GET" />
 
 [System receives response and continues]
 ```
@@ -277,7 +319,7 @@ Let me check your account information...
 <http 
   url="https://api.example.com/orders" 
   method="POST" 
-  body='{"customer_id":"{{X-CID}}","product":"widget","quantity":1}' 
+  body='{"customer_id":"{{ sip[\"X-CID\"] }}","product":"widget","quantity":1}' 
 />
 ```
 
@@ -361,7 +403,7 @@ sip:
     - "X-CID"
   bye_headers:
     - name: "X-Customer-ID"
-      value: "{{X-CID}}"
+      value: "{{ sip[\"X-CID\"] }}"
     - name: "X-Call-Result"
       value: "{{call_result}}"
     - name: "X-User-Confirmed"
@@ -372,7 +414,7 @@ llm:
 
 # Scene: main
 
-Hello! Your customer ID is {{X-CID}}.
+Hello! Your customer ID is {{ sip["X-CID"] }}.
 
 [Collect information...]
 <set_var key="user_confirmed" value="true" />
@@ -434,8 +476,8 @@ posthook:
 
 # Scene: greeting
 
-Hello {{X-Customer-Name}}! Your customer ID is {{X-Customer-ID}}.
-I see you're calling from {{X-Call-Source}}.
+Hello {{ sip["X-Customer-Name"] }}! Your customer ID is {{ sip["X-Customer-ID"] }}.
+I see you're calling from {{ sip["X-Call-Source"] }}.
 
 How can I help you today?
 
@@ -444,7 +486,7 @@ How can I help you today?
 Let me verify your account information...
 
 <http 
-  url="https://crm.example.com/api/customers/{{X-Customer-ID}}" 
+  url="https://crm.example.com/api/customers/{{ sip[\"X-Customer-ID\"] }}" 
   method="GET" 
   set_var="customer_info"
 />
@@ -466,7 +508,7 @@ Let me create a follow-up ticket for you...
 <http 
   url="https://crm.example.com/api/tickets" 
   method="POST" 
-  body='{"customer_id":"{{X-Customer-ID}}","issue":"{{issue_type}}","priority":"normal"}'
+  body='{"customer_id":"{{ sip[\"X-Customer-ID\"] }}","issue":"{{issue_type}}","priority":"normal"}'
   set_var="ticket_response"
 />
 
@@ -483,7 +525,7 @@ Thank you for calling! Have a great day!
 
 1. **Call Starts**
    - Extract SIP headers: `X-Customer-ID`, `X-Customer-Name`
-   - Variables available: `{{X-Customer-ID}}`, `{{X-Customer-Name}}`
+   - Variables available: `{{ sip["X-Customer-ID"] }}`, `{{ sip["X-Customer-Name"] }}`
 
 2. **Account Verification**
    - HTTP GET to CRM API

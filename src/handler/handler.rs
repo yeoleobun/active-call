@@ -25,7 +25,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-
 fn filter_headers(
     extras: &mut std::collections::HashMap<String, serde_json::Value>,
     allowed_headers: &[String],
@@ -119,7 +118,7 @@ pub async fn call_handler_core(
         dump_events,
         server_side_track,
         extras,
-        None, 
+        None,
     ));
 
     // Check for pending playbook
@@ -148,6 +147,16 @@ pub async fn call_handler_core(
                                 let mut state = active_call.call_state.write().await;
                                 if let Some(extras) = &mut state.extras {
                                     filter_headers(extras, allowed_headers);
+                                    // Store the list of SIP header keys for later template rendering
+                                    let header_keys: Vec<String> = extras
+                                        .keys()
+                                        .filter(|k| !k.starts_with('_'))
+                                        .cloned()
+                                        .collect();
+                                    extras.insert(
+                                        "_sip_header_keys".to_string(),
+                                        serde_json::to_value(&header_keys).unwrap_or_default(),
+                                    );
                                 }
                             }
                         }
@@ -155,29 +164,29 @@ pub async fn call_handler_core(
 
                     match PlaybookRunner::new(playbook, active_call.clone()) {
                         Ok(runner) => {
-                        crate::spawn(async move {
-                            runner.run().await;
-                        });
-                        let display_name = if name_or_content.trim().starts_with("---") {
-                            "custom content"
-                        } else {
-                            &name_or_content
-                        };
-                        info!(session_id, "Playbook runner started for {}", display_name);
-                    }
-                    Err(e) => {
-                        let display_name = if name_or_content.trim().starts_with("---") {
-                            "custom content"
-                        } else {
-                            &name_or_content
-                        };
-                        warn!(
-                            session_id,
-                            "Failed to create runner {}: {}", display_name, e
-                        )
+                            crate::spawn(async move {
+                                runner.run().await;
+                            });
+                            let display_name = if name_or_content.trim().starts_with("---") {
+                                "custom content"
+                            } else {
+                                &name_or_content
+                            };
+                            info!(session_id, "Playbook runner started for {}", display_name);
+                        }
+                        Err(e) => {
+                            let display_name = if name_or_content.trim().starts_with("---") {
+                                "custom content"
+                            } else {
+                                &name_or_content
+                            };
+                            warn!(
+                                session_id,
+                                "Failed to create runner {}: {}", display_name, e
+                            )
+                        }
                     }
                 }
-            },
                 Err(e) => {
                     let display_name = if name_or_content.trim().starts_with("---") {
                         "custom content"
@@ -479,7 +488,7 @@ mod tests {
         assert!(extras.contains_key("Custom-Header"));
         assert!(!extras.contains_key("X-User-ID"));
         assert!(!extras.contains_key("Irrelevant-Header"));
-        
+
         // ensure values are preserved
         assert_eq!(extras.get("X-Tenant-ID").unwrap(), &json!("123"));
         assert_eq!(extras.get("Custom-Header").unwrap(), &json!("abc"));

@@ -100,7 +100,7 @@ sip:
 
 # Prompt 中使用 {{var}} - 运行时替换
 # Scene: main
-你好，{{X-Customer-Name}}！     # ← 每次通话不同
+你好，{{ sip["X-Customer-Name"] }}！     # ← 每次通话不同
 ```
 
 **详细对比**：参见 [Template Syntax Comparison](template_syntax_comparison.md)
@@ -128,12 +128,18 @@ llm:
 
 ### 2. 在 Playbook 中使用
 
-提取的 Headers 会自动注入到 Playbook 的变量上下文中，可以使用 Jinja2 语法访问：
+提取的 Headers 会自动注入到 Playbook 的变量上下文中。由于 Header 名称通常包含连字符（如 `X-Customer-ID`），而 Jinja2 会将连字符解析为减法运算符，因此需要使用 **字典访问语法**：
 
 ```markdown
-你好！您的客户编号是 {{ X-CID }}。
-本次会话类型：{{ X-Session-Type }}。
+你好！您的客户编号是 {{ sip["X-CID"] }}。
+本次会话类型：{{ sip["X-Session-Type"] }}。
 ```
+
+**关键说明**：
+- ✅ **推荐**：`{{ sip["X-Header-Name"] }}` - 使用 `sip` 字典访问，支持包含连字符的变量名
+- ❌ **错误**：`{{ X-Header-Name }}` - 会被解析为 `X 减 Header 减 Name`，导致错误
+- 📋 **sip 字典范围**：只包含 Headers（比如以 `X-` 或 `x-` 开头的变量）
+- ✅ **普通变量**：对于不含连字符的变量（如 `customer_id`），可以直接使用 `{{ customer_id }}`
 
 ### 3. LLM 访问方式
 
@@ -141,7 +147,62 @@ LLM 可以通过系统消息获取这些变量（自动注入到上下文）：
 
 ```
 用户: 我的编号是多少？
-LLM: 根据系统记录，您的客户编号是 {{ X-CID }}。
+LLM: 根据系统记录，您的客户编号是 {{ sip["X-CID"] }}。
+```
+
+### 4. 使用 set_var 更新 SIP Headers
+
+在对话过程中，LLM 可以使用 `<set_var>` 动态设置或更新单个 SIP Header：
+
+```markdown
+LLM: 您的工单已创建 <set_var key="X-Ticket-ID" value="TKT-12345" />
+LLM: 通话评分为优秀 <set_var key="X-Call-Rating" value="excellent" />
+```
+
+这些设置的 Headers 会：
+- 立即写入 `ActiveCall.extras`
+- 在 BYE 请求的 `render_sip_headers` 中可用
+- 可被后续的模板引用
+
+### 5. BYE Headers 渲染
+
+挂断时，可以配置 `hangup_headers` 模板，访问所有变量（包括 SIP headers 和普通变量）：
+
+```yaml
+---
+sip:
+  extract_headers:
+    - "X-Customer-ID"
+  hangup_headers:
+    X-Call-Result: "{{ call_result }}"          # 普通变量
+    X-Customer: "{{ sip["X-Customer-ID"] }}"     # SIP Header
+    X-Agent: "{{ agent_name }}"                  # 普通变量
+---
+```
+
+在对话中设置变量：
+```markdown
+<set_var key="call_result" value="successful" />
+<set_var key="agent_name" value="Alice" />
+```
+
+### 6. 完整示例
+
+```yaml
+---
+sip:
+  extract_headers:
+    - "X-Customer-ID"
+    - "X-Customer-Name"
+    - "X-Session-Type"
+llm:
+  provider: "aliyun"
+  model: "qwen-turbo"
+  greeting: "{{ sip["X-Customer-Name"] }}您好！"
+---
+# Scene: main
+您的客户编号是 {{ sip["X-Customer-ID"] }}，会话类型为 {{ sip["X-Session-Type"] }}。
+请问有什么可以帮您？
 ```
 
 ---
@@ -347,7 +408,7 @@ sip:
 
 你是客服助手小智。请注意：
 
-1. 首先使用客户ID查询历史工单: <http url="https://api.crm.com/customers/{{ X-Customer-ID }}/tickets" />
+1. 首先使用客户ID查询历史工单: <http url="https://api.crm.com/customers/{{ sip[\"X-Customer-ID\"] }}/tickets" />
 2. 处理问题时创建工单并记录ID
 3. 对话中识别用户情绪（positive/neutral/negative）
 4. 结束时记录必要信息
