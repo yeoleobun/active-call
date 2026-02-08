@@ -318,12 +318,14 @@ impl AppStateInner {
                     let mut dialog_ref = dialog.clone();
                     let token_ref = token.clone();
                     let routing_state = self.routing_state.clone();
+                    let dialog_for_reject = dialog.clone();
+                    let guard_ref = guard.clone();
                     crate::spawn(async move {
                         let invite_loop = async {
                             match invitation_handler
                                 .on_invite(
                                     dialog_id_str.clone(),
-                                    token,
+                                    token.clone(),
                                     dialog.clone(),
                                     routing_state,
                                 )
@@ -331,8 +333,21 @@ impl AppStateInner {
                             {
                                 Ok(_) => (),
                                 Err(e) => {
+                                    // Webhook failed, reject the call immediately
                                     info!(id = dialog_id_str, "error handling invite: {:?}", e);
-                                    guard.drop_async().await;
+                                    let reason = format!("Failed to process invite: {}", e);
+                                    if let Err(reject_err) = dialog_for_reject.reject(
+                                        Some(rsip::StatusCode::ServiceUnavailable),
+                                        Some(reason),
+                                    ) {
+                                        info!(
+                                            id = dialog_id_str,
+                                            "error rejecting call: {:?}", reject_err
+                                        );
+                                    }
+                                    // Cancel token to stop dialog handling
+                                    token.cancel();
+                                    guard_ref.drop_async().await;
                                 }
                             }
                         };

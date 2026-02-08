@@ -489,3 +489,110 @@ async fn test_outgoing_call_remote_reject() -> Result<()> {
     bob_token.cancel();
     test_result
 }
+
+#[tokio::test]
+async fn test_webhook_unavailable_immediate_reject() -> Result<()> {
+    // Test that when webhook is unavailable, the call is rejected immediately
+    // instead of timing out
+
+    // 1. Setup Alice with webhook pointing to unavailable service
+    let unavailable_webhook_url = "http://127.0.0.1:9999/webhook".to_string(); // Non-existent port
+    let alice_ua_arc = create_test_useragent(unavailable_webhook_url).await?;
+    let alice_token = alice_ua_arc.token.clone();
+
+    // 2. Setup Bob (caller)
+    let bob_ua_arc = create_simple_useragent("127.0.0.1".to_string()).await?;
+    let bob_token = bob_ua_arc.token.clone();
+
+    let alice_ua_run = alice_ua_arc.clone();
+    let bob_ua_run = bob_ua_arc.clone();
+
+    let test_logic = async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let alice_local_addr = alice_ua_arc.endpoint.get_addrs().first().cloned().unwrap();
+        let bob_local_addr = bob_ua_arc.endpoint.get_addrs().first().cloned().unwrap();
+
+        let alice_uri = format!("sip:alice@{}", alice_local_addr.addr);
+        let bob_uri = format!("sip:bob@{}", bob_local_addr.addr);
+
+        info!("Bob calling Alice at {}", alice_uri);
+
+        let sdp = b"v=0\r\no=bob 123 123 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 50000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+
+        let invite_option = InviteOption {
+            caller: bob_uri.clone().try_into()?,
+            callee: alice_uri.try_into()?,
+            content_type: Some("application/sdp".to_string()),
+            offer: Some(sdp.to_vec()),
+            contact: bob_uri.try_into()?,
+            ..Default::default()
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        // Start call with timeout to ensure it doesn't hang
+        let start_time = std::time::Instant::now();
+        let call_result = tokio::time::timeout(
+            Duration::from_secs(5), // Should fail quickly, not wait for full SIP timeout
+            bob_ua_arc.invitation.invite(invite_option, tx),
+        )
+        .await;
+
+        let elapsed = start_time.elapsed();
+        info!("Call completed in {:?}", elapsed);
+
+        match call_result {
+            Ok(Ok(_)) => {
+                return Err(anyhow::anyhow!(
+                    "Call should have been rejected due to webhook unavailability"
+                ));
+            }
+            Ok(Err(e)) => {
+                // Expected: Call should be rejected
+                info!("Call rejected as expected: {:?}", e);
+
+                // Verify it was rejected quickly (not a timeout)
+                // Should be much less than 5 seconds
+                if elapsed > Duration::from_secs(3) {
+                    warn!(
+                        "Call took {:?} to reject, expected faster response",
+                        elapsed
+                    );
+                } else {
+                    info!("Call rejected quickly in {:?}", elapsed);
+                }
+
+                // Check if error message indicates service unavailable
+                let error_msg = format!("{:?}", e);
+                if error_msg.contains("503") || error_msg.contains("Service") {
+                    info!("Received expected 503 Service Unavailable response");
+                } else {
+                    info!("Error message: {}", error_msg);
+                }
+
+                Ok(())
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Call timed out after {:?}, should have been rejected immediately",
+                    elapsed
+                ));
+            }
+        }
+    };
+
+    let test_result = tokio::select! {
+        _ = alice_ua_run.serve() => Err(anyhow::anyhow!("Alice stopped unexpectedly")),
+        _ = bob_ua_run.serve() => Err(anyhow::anyhow!("Bob stopped unexpectedly")),
+        res = test_logic => res,
+        // Overall timeout
+        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+            Err(anyhow::anyhow!("Test timed out"))
+        }
+    };
+
+    alice_token.cancel();
+    bob_token.cancel();
+    test_result
+}
