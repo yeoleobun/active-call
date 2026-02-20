@@ -134,6 +134,7 @@ impl RtcTrack {
         }
 
         let mut config = RtcConfiguration::default();
+        config.enable_ice_lite = true;
         if self.ssrc != 0 {
             config.ssrc_start = self.ssrc;
         }
