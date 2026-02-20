@@ -309,6 +309,7 @@ impl Default for Config {
             rtp_end_port: default_config_rtp_end_port(),
             enable_rtp_latching: Some(true),
             rtp_bind_ip: None,
+            enable_ice_lite: None,
             recording: None,
             rewrites: None,
         }
