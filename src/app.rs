@@ -722,88 +722,32 @@ impl AppStateBuilder {
         // Create UDP socket with SO_REUSEPORT for graceful restarts
         #[cfg(unix)]
         let std_socket = {
-            use std::os::unix::io::FromRawFd;
+            use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
             let domain = if local_addr.is_ipv4() {
-                libc::AF_INET
+                Domain::IPV4
             } else {
-                libc::AF_INET6
+                Domain::IPV6
             };
-            let fd = unsafe { libc::socket(domain, libc::SOCK_DGRAM, 0) };
-            if fd < 0 {
-                return Err(anyhow::anyhow!("Failed to create UDP socket"));
-            }
+            let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+                .map_err(|err| anyhow::anyhow!("Failed to create UDP socket: {}", err))?;
 
-            let optval: libc::c_int = 1;
-            unsafe {
-                // SO_REUSEADDR
-                if libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEADDR,
-                    &optval as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                ) != 0
-                {
-                    libc::close(fd);
-                    return Err(anyhow::anyhow!("Failed to set SO_REUSEADDR"));
-                }
+            socket
+                .set_reuse_address(true)
+                .map_err(|err| anyhow::anyhow!("Failed to set SO_REUSEADDR: {}", err))?;
 
-                // SO_REUSEPORT (Linux/BSD)
-                #[cfg(any(
-                    target_os = "linux",
-                    target_os = "android",
-                    target_os = "freebsd",
-                    target_os = "openbsd",
-                    target_os = "netbsd",
-                    target_os = "dragonfly",
-                    target_os = "macos",
-                    target_os = "ios"
-                ))]
-                if libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEPORT,
-                    &optval as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                ) != 0
-                {
-                    libc::close(fd);
-                    return Err(anyhow::anyhow!("Failed to set SO_REUSEPORT"));
-                }
+            // SO_REUSEPORT (Linux/BSD)
+            #[cfg(not(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin")))]
+            socket
+                .set_reuse_port(true)
+                .map_err(|err| anyhow::anyhow!("Failed to set SO_REUSEPORT: {}", err))?;
 
-                // Bind
-                let (sockaddr_ptr, sockaddr_len) = match local_addr {
-                    std::net::SocketAddr::V4(addr_v4) => {
-                        let mut addr_in: libc::sockaddr_in = std::mem::zeroed();
-                        addr_in.sin_family = libc::AF_INET as libc::sa_family_t;
-                        addr_in.sin_port = addr_v4.port().to_be();
-                        addr_in.sin_addr.s_addr = u32::from(*addr_v4.ip()).to_be();
-                        (
-                            &addr_in as *const _ as *const libc::sockaddr,
-                            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                        )
-                    }
-                    std::net::SocketAddr::V6(addr_v6) => {
-                        let mut addr_in6: libc::sockaddr_in6 = std::mem::zeroed();
-                        addr_in6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-                        addr_in6.sin6_port = addr_v6.port().to_be();
-                        addr_in6.sin6_addr.s6_addr = addr_v6.ip().octets();
-                        (
-                            &addr_in6 as *const _ as *const libc::sockaddr,
-                            std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-                        )
-                    }
-                };
+            socket
+                .bind(&SockAddr::from(local_addr))
+                .map_err(|err| anyhow::anyhow!("Failed to bind UDP socket: {}", err))?;
 
-                if libc::bind(fd, sockaddr_ptr, sockaddr_len) < 0 {
-                    let err = std::io::Error::last_os_error();
-                    libc::close(fd);
-                    return Err(anyhow::anyhow!("Failed to bind UDP socket: {}", err));
-                }
-
-                std::net::UdpSocket::from_raw_fd(fd)
-            }
+            let std_socket: std::net::UdpSocket = socket.into();
+            std_socket
         };
 
         #[cfg(not(unix))]

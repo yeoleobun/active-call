@@ -85,7 +85,7 @@ urlencoding = "2.1.3"
 base64 = "0.22.1"
 url = "2.5.8"
 unic-emoji = "0.9.0"
-socket2 = "0.5"
+socket2 = { version = "0.6", features = ["all"] }
 realfft = "3.3"
 rmp3 = "0.3"
 tempfile = "3.24.0"
