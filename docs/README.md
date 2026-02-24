@@ -29,6 +29,11 @@ Welcome to the Active Call documentation hub. This directory contains comprehens
 - **[A Decoupled Architecture for AI Voice Agent Development (EN)](./a%20decoupled%20architecture%20for%20AI%20Voice%20Agent%20en.md)** - System architecture overview
 - **[分体式VoiceAgent架构 (中文)](./a%20decoupled%20architecture%20for%20AI%20Voice%20Agent%20zh.md)** - 系统架构说明
 
+### Carrier Integration
+
+- **[Twilio Elastic SIP Trunking](./twilio_integration.md)** - Connect active-call to Twilio (TLS + SRTP)
+- **[Telnyx SIP Trunking](./telnyx_integration.md)** - Connect active-call to Telnyx
+
 ### Advanced Features
 
 Explore advanced features in the [`features/`](../features/) directory:

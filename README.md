@@ -11,11 +11,14 @@
 - **[API Documentation](./docs/api.md)** - WebSocket API reference
 - **[Playbook Tutorial](./docs/playbook_tutorial.en.md)** - Building stateful voice agents
 - **[Advanced Playbook Features](./docs/playbook_advanced_features.md)** - SIP Headers, Variables, HTTP Integration ⭐ **NEW**
+- **[Twilio Integration Guide](./docs/twilio_integration.md)** - Connect to Twilio Elastic SIP Trunking
+- **[Telnyx Integration Guide](./docs/telnyx_integration.md)** - Connect to Telnyx SIP Trunking
 
 ### 中文文档
 
 - **[配置指南](./docs/config_guide.zh.md)** - 完整的中文配置指南
 - **[Playbook 高级特性](./docs/playbook_advanced_features.md)** - SIP Headers、变量管理、HTTP 调用等 ⭐ **新增**
+- **[Twilio 集成指南](./docs/twilio_integration.md)** - 接入 Twilio Elastic SIP Trunking
 - **[Playbook 示例库](./config/playbook/README.md)** - 包含简单到高级的完整示例
   - [简单 CRM 客服](./config/playbook/simple_crm.md) - SIP Headers 基础
   - [HTTP Webhook 集成](./config/playbook/webhook_example.md) - 外部 API 调用
@@ -53,7 +56,7 @@ See [Advanced Features Guide](./docs/playbook_advanced_features.md) for details.
 
 `active-call` supports a wide range of communication protocols, ensuring compatibility with both legacy and modern systems:
 
-- **SIP (Telephony)**: Supports standard SIP signaling. Can act as a **SIP Client/Extension** to register with PBX systems like **[RustPBX](https://github.com/restsend/rustpbx)**, **FreeSWITCH** or **Asterisk**, or handle direct SIP incoming/outgoing calls.
+- **SIP (Telephony)**: Supports standard SIP signaling over UDP, TCP, **TLS (SIPS)**, and WebSocket. Can act as a **SIP Client/Extension** to register with PBX systems like **[RustPBX](https://github.com/restsend/rustpbx)**, **FreeSWITCH** or **Asterisk**, or handle direct SIP incoming/outgoing calls. Integrates with PSTN carriers such as **[Twilio Elastic SIP Trunking](./docs/twilio_integration.md)** and **[Telnyx](./docs/telnyx_integration.md)**.
 - **WebRTC**: Direct browser-to-agent communication with low-latency SRTP. (Note: WebRTC requires a secure context. You must use **HTTPS** or **127.0.0.1** to access your web client).
 - **Voice over WebSocket**: A highly flexible API for custom integrations. Push raw PCM/encoded audio over WebSocket and receive real-time events.
 
@@ -176,12 +179,30 @@ vad:
 
 For developers who need full control, `active-call` provides a raw audio-over-websocket interface. This is ideal for custom web apps or integration with existing AI pipelines where you want to handle the audio stream manually.
 
-### SIP PBX Integration
+### SIP PBX & Carrier Integration
 
-`active-call` can be integrated into existing corporate telephony:
+`active-call` can be integrated into existing corporate telephony and PSTN carrier networks:
 
 - **As an Extension**: Register `active-call` to your [RustPBX](https://github.com/restsend/rustpbx), FreeSWITCH or Asterisk PBX like any other VoIP phone. AI agents can then receive calls from internal extensions or external trunks.
 - **As a Trunk**: Handle incoming SIP traffic directly from carriers.
+- **Twilio Elastic SIP Trunking**: Standard SIP integration with TLS + SRTP. See [Twilio Integration Guide](./docs/twilio_integration.md).
+- **Telnyx SIP Trunking**: Standard SIP integration with optional TLS + SRTP. See [Telnyx Integration Guide](./docs/telnyx_integration.md).
+
+#### TLS and SRTP Support
+
+For carrier integrations that require encrypted signaling and media:
+
+```toml
+# SIP over TLS (SIPS) — required by Twilio, recommended for production
+tls_port      = 5061
+tls_cert_file = "./certs/cert.pem"
+tls_key_file  = "./certs/key.pem"
+
+# SRTP — encrypted media transport
+enable_srtp   = true
+```
+
+SRTP can also be overridden per-call via the API (`sip.enableSrtp`).
 
 ### SIP Invitation Handlers
 
@@ -604,6 +625,10 @@ docker run -d \
 - [Configuration Guide](docs/config_guide.en.md) - Complete configuration reference
 - [API Documentation](docs/api.md) - HTTP API reference
 
+**Carrier Integration**
+- [Twilio Integration Guide](docs/twilio_integration.md) - Connect to Twilio Elastic SIP Trunking (TLS + SRTP)
+- [Telnyx Integration Guide](docs/telnyx_integration.md) - Connect to Telnyx SIP Trunking
+
 **Advanced Features (v0.3.37+)**
 - [Playbook Advanced Features (EN)](docs/playbook_advanced_features.en.md) - Complete guide including universal `${VAR}` support, SIP Headers, Variables, HTTP Commands
 - [Template Syntax Comparison (EN)](docs/template_syntax_comparison.en.md) - `${VAR}` vs `{{var}}` explained
@@ -620,6 +645,10 @@ docker run -d \
 **快速开始**
 - [配置指南](docs/config_guide.zh.md) - 完整配置参考
 - [API 文档](docs/api.md) - HTTP API 参考
+
+**运营商接入**
+- [Twilio 集成指南](docs/twilio_integration.md) - 接入 Twilio Elastic SIP Trunking（TLS + SRTP）
+- [Telnyx 集成指南](docs/telnyx_integration.md) - 接入 Telnyx SIP Trunking
 
 **高级特性 (v0.3.37+)**
 - [Playbook 高级特性 (中文)](docs/playbook_advanced_features.md) - 包含通用 `${VAR}` 支持、SIP Headers、变量、HTTP 命令完整指南

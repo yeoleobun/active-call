@@ -201,6 +201,11 @@ pub struct Config {
     pub enable_rtp_latching: Option<bool>,
     pub enable_ice_lite: Option<bool>,
     pub rtp_bind_ip: Option<String>,
+    pub tls_port: Option<u16>,
+    pub tls_cert_file: Option<String>,
+    pub tls_key_file: Option<String>,
+
+    pub enable_srtp: Option<bool>,
 
     pub callrecord: Option<CallRecordConfig>,
     #[serde(default = "default_config_media_cache_path")]
@@ -310,6 +315,10 @@ impl Default for Config {
             enable_rtp_latching: Some(true),
             rtp_bind_ip: None,
             enable_ice_lite: None,
+            tls_port: None,
+            tls_cert_file: None,
+            tls_key_file: None,
+            enable_srtp: None,
             recording: None,
             rewrites: None,
         }

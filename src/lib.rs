@@ -41,6 +41,7 @@ pub struct SipOption {
     pub headers: Option<HashMap<String, String>>,
     pub hangup_headers: Option<HashMap<String, String>>,
     pub extract_headers: Option<Vec<String>>,
+    pub enable_srtp: Option<bool>,
 }
 
 #[skip_serializing_none]

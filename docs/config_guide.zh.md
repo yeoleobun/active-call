@@ -6,6 +6,7 @@
 
 - [基础配置](#基础配置)
 - [网络配置](#网络配置)
+- [TLS 与 SRTP 配置](#tls-与-srtp-配置)
 - [媒体配置](#媒体配置)
 - [呼入处理配置](#呼入处理配置)
 - [录音与CDR配置](#录音与cdr配置)
@@ -87,6 +88,75 @@ urls = ["turn:turn.example.com:3478"]
 username = "turnuser"
 credential = "turnpass"
 ```
+
+---
+
+## TLS 与 SRTP 配置
+
+适用于需要加密信令和媒体传输的 PSTN 运营商对接场景（如 Twilio、Telnyx 等）。
+
+### SIP over TLS（SIPS）
+
+```toml
+# TLS 端口，用于加密的 SIP 信令（SIPS）
+# Twilio 要求使用 TLS；生产环境运营商对接建议开启
+tls_port      = 5061
+tls_cert_file = "./certs/cert.pem"   # TLS 证书路径（PEM 格式）
+tls_key_file  = "./certs/key.pem"    # TLS 私钥路径（PEM 格式）
+```
+
+设置 `tls_port` 后，active-call 将在该端口额外启动一个 TLS SIP 侦听器。原有的 `udp_port` UDP 侦听器同时保持运行。
+
+**生成自签名证书**（测试用）：
+
+```bash
+mkdir -p certs
+openssl req -x509 -newkey rsa:2048 -keyout certs/key.pem \
+  -out certs/cert.pem -days 365 -nodes \
+  -subj "/CN=你的公网IP或域名"
+```
+
+生产环境建议使用 CA 签名证书（如 Let's Encrypt）。
+
+### SRTP（加密媒体）
+
+```toml
+# 全局开启 SRTP 加密媒体传输
+# 开启 tls_port 时推荐同时开启 SRTP
+enable_srtp = true
+```
+
+也可以在 **HTTP API 调用时按通话覆盖**：
+
+```json
+{
+  "callee": "sip:+18005551234@yourdomain.pstn.twilio.com",
+  "sip": {
+    "enableSrtp": true
+  }
+}
+```
+
+**SRTP 优先级链**（由高到低）：
+1. API 调用 body 中的 `sip.enableSrtp` — 单次通话覆盖
+2. `active-call.toml` 中的 `enable_srtp` — 全局默认
+3. `false` — 明文 RTP（兜底）
+
+### 配置示例：对接 Twilio 的完整配置
+
+```toml
+addr          = "0.0.0.0"
+udp_port      = 5060
+tls_port      = 5061
+tls_cert_file = "./certs/cert.pem"
+tls_key_file  = "./certs/key.pem"
+enable_srtp   = true
+external_ip   = "你的公网IP"
+rtp_start_port = 12000
+rtp_end_port   = 42000
+```
+
+完整的运营商对接流程，请参阅 [Twilio 集成指南](./twilio_integration.md)。
 
 ---
 

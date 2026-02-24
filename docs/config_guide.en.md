@@ -6,6 +6,7 @@ This document provides detailed information about the `active-call` configuratio
 
 - [Basic Configuration](#basic-configuration)
 - [Network Configuration](#network-configuration)
+- [TLS & SRTP Configuration](#tls--srtp-configuration)
 - [Media Configuration](#media-configuration)
 - [Inbound Call Handler Configuration](#inbound-call-handler-configuration)
 - [Recording & CDR Configuration](#recording--cdr-configuration)
@@ -90,6 +91,75 @@ urls = ["turn:turn.example.com:3478"]
 username = "turnuser"
 credential = "turnpass"
 ```
+
+---
+
+## TLS & SRTP Configuration
+
+For PSTN carrier integrations (e.g. Twilio, Telnyx) that require or recommend encrypted signaling and media.
+
+### SIP over TLS (SIPS)
+
+```toml
+# TLS port for encrypted SIP signaling (SIPS)
+# Twilio requires TLS; recommended for any production carrier connection
+tls_port      = 5061
+tls_cert_file = "./certs/cert.pem"   # Path to TLS certificate (PEM format)
+tls_key_file  = "./certs/key.pem"    # Path to TLS private key (PEM format)
+```
+
+When `tls_port` is set, active-call starts a second SIP listener on that port using TLS. The existing UDP listener on `udp_port` continues to run in parallel.
+
+**Generating a self-signed certificate** (for testing):
+
+```bash
+mkdir -p certs
+openssl req -x509 -newkey rsa:2048 -keyout certs/key.pem \
+  -out certs/cert.pem -days 365 -nodes \
+  -subj "/CN=YOUR_PUBLIC_IP_OR_DOMAIN"
+```
+
+For production, use a CA-signed certificate (e.g. from Let's Encrypt).
+
+### SRTP (Encrypted Media)
+
+```toml
+# Enable SRTP for encrypted media transport (global default)
+# Recommended when tls_port is active
+enable_srtp = true
+```
+
+SRTP can also be **overridden per-call** via the HTTP API:
+
+```json
+{
+  "callee": "sip:+18005551234@yourdomain.pstn.twilio.com",
+  "sip": {
+    "enableSrtp": true
+  }
+}
+```
+
+**SRTP priority chain** (highest to lowest):
+1. `sip.enableSrtp` in the API call body — per-call override
+2. `enable_srtp` in `active-call.toml` — global default
+3. `false` — plain RTP (fallback)
+
+### Complete Example: Twilio-Ready Configuration
+
+```toml
+addr          = "0.0.0.0"
+udp_port      = 5060
+tls_port      = 5061
+tls_cert_file = "./certs/cert.pem"
+tls_key_file  = "./certs/key.pem"
+enable_srtp   = true
+external_ip   = "YOUR_PUBLIC_IP"
+rtp_start_port = 12000
+rtp_end_port   = 42000
+```
+
+See the [Twilio Integration Guide](./twilio_integration.md) for the full carrier setup walkthrough.
 
 ---
 

@@ -1555,9 +1555,22 @@ impl ActiveCall {
         }
     }
 
-    pub async fn create_rtp_track(&self, track_id: TrackId, ssrc: u32) -> Result<RtcTrack> {
+    pub async fn create_rtp_track(
+        &self,
+        track_id: TrackId,
+        ssrc: u32,
+        enable_srtp: Option<bool>,
+    ) -> Result<RtcTrack> {
         let mut rtc_config = RtcTrackConfig::default();
-        rtc_config.mode = rustrtc::TransportMode::Rtp;
+        // Per-call flag takes precedence over global config.
+        let use_srtp = enable_srtp
+            .or(self.app_state.config.enable_srtp)
+            .unwrap_or(false);
+        rtc_config.mode = if use_srtp {
+            rustrtc::TransportMode::Srtp
+        } else {
+            rustrtc::TransportMode::Rtp
+        };
 
         if let Some(codecs) = &self.app_state.config.codecs {
             let mut codec_types = Vec::new();
@@ -2015,8 +2028,9 @@ impl ActiveCall {
         auto_hangup: bool,
     ) -> Result<String, rsipstack::Error> {
         let ssrc = call_state_ref.read().await.ssrc;
+        let per_call_srtp = call_option.sip.as_ref().and_then(|s| s.enable_srtp);
         let rtp_track = self
-            .create_rtp_track(track_id.clone(), ssrc)
+            .create_rtp_track(track_id.clone(), ssrc, per_call_srtp)
             .await
             .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
 
@@ -2231,7 +2245,10 @@ impl ActiveCall {
 
             Box::new(webrtc_track) as Box<dyn Track>
         } else {
-            let rtp_track = self.create_rtp_track(self.session_id.clone(), ssrc).await?;
+            let per_call_srtp = option.sip.as_ref().and_then(|s| s.enable_srtp);
+            let rtp_track = self
+                .create_rtp_track(self.session_id.clone(), ssrc, per_call_srtp)
+                .await?;
             Box::new(rtp_track) as Box<dyn Track>
         };
 

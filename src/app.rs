@@ -835,6 +835,46 @@ impl AppStateBuilder {
             local_addr
         );
 
+        // Optional SIP over TLS transport
+        if let Some(tls_port) = config.tls_port {
+            let tls_addr: std::net::SocketAddr = format!("{}:{}", local_ip, tls_port).parse()?;
+            let tls_sip_addr = rsipstack::transport::SipAddr {
+                r#type: Some(rsip::transport::Transport::Tls),
+                addr: tls_addr.into(),
+            };
+            let mut tls_cfg = rsipstack::transport::tls::TlsConfig::default();
+            if let Some(ref cert_path) = config.tls_cert_file {
+                tls_cfg.cert = Some(
+                    std::fs::read(cert_path)
+                        .map_err(|e| anyhow::anyhow!("tls_cert_file: {}", e))?,
+                );
+            }
+            if let Some(ref key_path) = config.tls_key_file {
+                tls_cfg.key = Some(
+                    std::fs::read(key_path).map_err(|e| anyhow::anyhow!("tls_key_file: {}", e))?,
+                );
+            }
+            let external_tls_addr = config
+                .external_ip
+                .as_ref()
+                .and_then(|ip| format!("{}:{}", ip, tls_port).parse().ok());
+            match rsipstack::transport::tls::TlsListenerConnection::new(
+                tls_sip_addr,
+                external_tls_addr,
+                tls_cfg,
+            )
+            .await
+            {
+                Ok(tls_conn) => {
+                    transport_layer.add_transport(tls_conn.into());
+                    info!("TLS SIP transport started on {}:{}", local_ip, tls_port);
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to start TLS SIP transport: {}", e));
+                }
+            }
+        }
+
         let endpoint_option = rsipstack::transaction::endpoint::EndpointOption::default();
         let mut endpoint_builder = rsipstack::EndpointBuilder::new();
         if let Some(ref user_agent) = config.useragent {
