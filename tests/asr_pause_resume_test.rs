@@ -4,16 +4,20 @@
 /// 1. ReferOption.pause_parent_asr field exists and can be set
 /// 2. ActiveCallState.pending_asr_resume field exists for state tracking
 /// 3. MediaStream supports processor add/remove operations
+/// 4. SessionEvent::Hangup { refer: Some(true) } is handled without panic in the async event loop
 use active_call::{
     ReferOption,
     app::AppStateBuilder,
-    call::{ActiveCall, ActiveCallType},
+    call::{ActiveCall, ActiveCallType, active_call::ActiveCallState},
     config::Config,
-    media::{engine::StreamEngine, track::TrackConfig},
+    event::SessionEvent,
+    media::{engine::StreamEngine, get_timestamp, track::TrackConfig},
     transcription::{TranscriptionOption, TranscriptionType},
 };
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -255,6 +259,114 @@ async fn test_pending_asr_resume_lifecycle() -> Result<()> {
         }
         assert!(state.pending_asr_resume.is_none());
     }
+
+    Ok(())
+}
+
+/// Regression test: SessionEvent::Hangup { refer: Some(true) } must not panic in the async
+/// event_hook_loop.  The original code called `blocking_read()` on an RwLock inside an async
+/// context (inside a `select!` branch), which panics at runtime.  After the fix the code uses
+/// `try_read()` which is safe from any context.
+#[tokio::test]
+async fn test_refer_hangup_event_in_async_does_not_panic() -> Result<()> {
+    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
+
+    let mut config = Config::default();
+    config.udp_port = 0;
+    config.media_cache_path = "/tmp/mediacache".to_string();
+
+    let stream_engine = Arc::new(StreamEngine::default());
+    let app_state = AppStateBuilder::new()
+        .with_config(config)
+        .with_stream_engine(stream_engine)
+        .build()
+        .await?;
+
+    let cancel_token = CancellationToken::new();
+    let session_id = format!("test-refer-hangup-no-panic-{}", uuid::Uuid::new_v4());
+
+    let active_call = Arc::new(ActiveCall::new(
+        ActiveCallType::Sip,
+        cancel_token.clone(),
+        session_id.clone(),
+        app_state.invitation.clone(),
+        app_state.clone(),
+        TrackConfig::default(),
+        None,
+        false,
+        None,
+        None,
+        None,
+    ));
+
+    // The ssrc stored in pending_asr_resume must match the one in refer_callstate so that
+    // `is_refer_hangup` evaluates to true and the lock-acquisition code path is exercised.
+    let refer_ssrc: u32 = 0xDEAD_BEEF;
+
+    // Build a minimal refer_callstate with the matching ssrc.
+    let refer_state: Arc<RwLock<ActiveCallState>> = Arc::new(RwLock::new(ActiveCallState {
+        ssrc: refer_ssrc,
+        is_refer: true,
+        ..Default::default()
+    }));
+
+    {
+        let mut state = active_call.call_state.write().await;
+        state.pending_asr_resume = Some((
+            refer_ssrc,
+            TranscriptionOption {
+                provider: Some(TranscriptionType::Aliyun),
+                ..Default::default()
+            },
+        ));
+        state.refer_callstate = Some(refer_state);
+    }
+
+    // Start serve() in a background task.  new_receiver() must be called before serve().
+    let receiver = active_call.new_receiver();
+    let call_clone = active_call.clone();
+    let serve_handle = tokio::spawn(async move {
+        call_clone.serve(receiver).await.ok();
+    });
+
+    // Give the event loop a moment to enter the select!.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Fire the exact session event that triggered the blocking_read() panic.
+    let now = get_timestamp();
+    active_call
+        .event_sender
+        .send(SessionEvent::Hangup {
+            track_id: session_id.clone(),
+            timestamp: now,
+            reason: Some("refer ended".to_string()),
+            initiator: None,
+            start_time: "2026-01-01T00:00:00Z".to_string(),
+            hangup_time: "2026-01-01T00:00:01Z".to_string(),
+            answer_time: None,
+            ringing_time: None,
+            from: None,
+            to: None,
+            extra: None,
+            refer: Some(true),
+        })
+        .ok();
+
+    // Allow the event to be processed.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // After the event is processed pending_asr_resume should have been consumed.
+    {
+        let state = active_call.call_state.read().await;
+        assert!(
+            state.pending_asr_resume.is_none(),
+            "pending_asr_resume should be consumed after Hangup(refer=true)"
+        );
+    }
+
+    // Shut down cleanly – the old code would have already panicked above.
+    cancel_token.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), serve_handle).await;
 
     Ok(())
 }
