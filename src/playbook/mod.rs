@@ -104,6 +104,7 @@ pub struct PostHookConfig {
     pub method: Option<String>,
     pub headers: Option<HashMap<String, String>>,
     pub include_history: Option<bool>,
+    pub timeout: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

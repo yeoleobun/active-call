@@ -3,6 +3,7 @@ use crate::call::{ActiveCallRef, Command};
 use crate::event::EventReceiver;
 use anyhow::{Result, anyhow};
 use serde_json::json;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 use super::{Playbook, PlaybookConfig, dialogue::DialogueHandler, handler::LlmHandler};
@@ -154,62 +155,74 @@ impl PlaybookRunner {
         // Post-hook logic
         if let Some(posthook) = self.config.posthook.clone() {
             let mut handler = self.handler;
-            let call = self.call.clone();
+            let session_id = self.call.session_id.clone();
+            // Drop the ActiveCallRef before spawning to avoid keeping the entire call alive
+            drop(self.call);
             crate::spawn(async move {
-                info!("Executing posthook for session {}", call.session_id);
+                info!("Executing posthook for session {}", session_id);
 
-                let summary = if let Some(summary_type) = &posthook.summary {
-                    match handler.summarize(summary_type.prompt()).await {
-                        Ok(s) => Some(s),
+                let posthook_timeout = Duration::from_secs(
+                    posthook.timeout.unwrap_or(30) as u64
+                );
+
+                let posthook_task = async {
+                    let summary = if let Some(summary_type) = &posthook.summary {
+                        match handler.summarize(summary_type.prompt()).await {
+                            Ok(s) => Some(s),
+                            Err(e) => {
+                                error!("Failed to generate summary: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let history = if posthook.include_history.unwrap_or(true) {
+                        Some(handler.get_history().await)
+                    } else {
+                        None
+                    };
+
+                    let payload = json!({
+                        "sessionId": session_id,
+                        "summary": summary,
+                        "history": history,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    });
+
+                    let client = reqwest::Client::new();
+                    let method = posthook
+                        .method
+                        .as_deref()
+                        .unwrap_or("POST")
+                        .parse::<reqwest::Method>()
+                        .unwrap_or(reqwest::Method::POST);
+
+                    let mut request = client.request(method, &posthook.url).json(&payload);
+
+                    if let Some(headers) = posthook.headers {
+                        for (k, v) in headers {
+                            request = request.header(k, v);
+                        }
+                    }
+
+                    match request.send().await {
+                        Ok(resp) => {
+                            if resp.status().is_success() {
+                                info!("Posthook sent successfully");
+                            } else {
+                                warn!("Posthook failed with status: {}", resp.status());
+                            }
+                        }
                         Err(e) => {
-                            error!("Failed to generate summary: {}", e);
-                            None
+                            error!("Failed to send posthook: {}", e);
                         }
                     }
-                } else {
-                    None
                 };
 
-                let history = if posthook.include_history.unwrap_or(true) {
-                    Some(handler.get_history().await)
-                } else {
-                    None
-                };
-
-                let payload = json!({
-                    "sessionId": call.session_id,
-                    "summary": summary,
-                    "history": history,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                });
-
-                let client = reqwest::Client::new();
-                let method = posthook
-                    .method
-                    .as_deref()
-                    .unwrap_or("POST")
-                    .parse::<reqwest::Method>()
-                    .unwrap_or(reqwest::Method::POST);
-
-                let mut request = client.request(method, &posthook.url).json(&payload);
-
-                if let Some(headers) = posthook.headers {
-                    for (k, v) in headers {
-                        request = request.header(k, v);
-                    }
-                }
-
-                match request.send().await {
-                    Ok(resp) => {
-                        if resp.status().is_success() {
-                            info!("Posthook sent successfully");
-                        } else {
-                            warn!("Posthook failed with status: {}", resp.status());
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to send posthook: {}", e);
-                    }
+                if tokio::time::timeout(posthook_timeout, posthook_task).await.is_err() {
+                    error!("Posthook timed out for session {}", session_id);
                 }
             });
         }
@@ -335,5 +348,44 @@ mod tests {
             option.eou.as_ref().unwrap().secret_key,
             Some("test-key".to_string())
         );
+    }
+
+    #[test]
+    fn posthook_config_timeout_default() {
+        use crate::playbook::PostHookConfig;
+
+        // Test default timeout (None -> should use 30 in code)
+        let config = PostHookConfig {
+            url: "http://example.com".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.timeout, None);
+        // Code uses unwrap_or(30), verify the logic
+        assert_eq!(config.timeout.unwrap_or(30), 30);
+
+        // Test custom timeout
+        let config = PostHookConfig {
+            url: "http://example.com".to_string(),
+            timeout: Some(60),
+            ..Default::default()
+        };
+        assert_eq!(config.timeout, Some(60));
+        assert_eq!(config.timeout.unwrap_or(30), 60);
+    }
+
+    #[test]
+    fn posthook_config_serde_with_timeout() {
+        use crate::playbook::PostHookConfig;
+
+        // Test that timeout field is correctly serialized/deserialized
+        let json = r#"{"url": "http://example.com", "timeout": 45}"#;
+        let config: PostHookConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.timeout, Some(45));
+        assert_eq!(config.url, "http://example.com");
+
+        // Without timeout
+        let json = r#"{"url": "http://example.com"}"#;
+        let config: PostHookConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.timeout, None);
     }
 }

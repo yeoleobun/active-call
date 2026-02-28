@@ -223,14 +223,6 @@ async fn main() -> Result<()> {
             let session_id = format!("c.{}", Uuid::new_v4());
             info!(session_id, "Starting CLI outgoing call to: {}", callee);
 
-            if let Some(playbook) = playbook {
-                app_state_clone
-                    .pending_playbooks
-                    .lock()
-                    .await
-                    .insert(session_id.clone(), playbook);
-            }
-
             let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
             let (event_sender, _event_receiver) = tokio::sync::mpsc::unbounded_channel();
             let (_audio_tx, audio_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -258,6 +250,8 @@ async fn main() -> Result<()> {
                 0,
                 command_receiver,
                 event_sender,
+                None,     // extras
+                playbook, // playbook_name — passed directly
             )
             .await;
         });

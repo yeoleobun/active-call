@@ -1198,37 +1198,15 @@ impl ActiveCall {
         if let Some(headers) = headers {
             let h_val = serde_json::to_value(&headers).unwrap_or_default();
 
-            // Update ActiveCallState extras
             {
                 let mut state = self.call_state.write().await;
                 let mut extras = state.extras.take().unwrap_or_default();
                 extras.insert("_hangup_headers".to_string(), h_val.clone());
                 state.extras = Some(extras);
             }
-
-            // Update AppState pending_params for retrieval by PlaybookInvitationHandler (for SIP BYE)
-            {
-                let mut pending = self.app_state.pending_params.lock().await;
-                let params = pending
-                    .entry(self.session_id.clone())
-                    .or_insert_with(std::collections::HashMap::new);
-                params.insert("_hangup_headers".to_string(), h_val);
-            }
         } else {
-            // Check if headers are in active call state, if so, ensure they are in pending_params
-            let state = self.call_state.read().await;
-            if let Some(extras) = &state.extras {
-                if let Some(h_val) = extras.get("_hangup_headers") {
-                    let mut pending = self.app_state.pending_params.lock().await;
-                    let params = pending
-                        .entry(self.session_id.clone())
-                        .or_insert_with(std::collections::HashMap::new);
-                    params.insert("_hangup_headers".to_string(), h_val.clone());
-                }
-            }
         }
 
-        // Set hangup reason based on initiator and reason
         let hangup_reason = match initiator.as_deref() {
             Some("caller") => CallRecordHangupReason::ByCaller,
             Some("callee") => CallRecordHangupReason::ByCallee,

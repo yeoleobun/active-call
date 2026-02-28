@@ -120,6 +120,16 @@ impl MediaStream {
 
     pub async fn cleanup(&self) -> Result<()> {
         self.cancel_token.cancel();
+        {
+            let mut tracks = self.tracks.lock().await;
+            for (id, (track, _)) in tracks.drain() {
+                if let Err(e) = track.stop().await {
+                    warn!(session_id = self.id, track_id = %id, "failed to stop track during cleanup: {}", e);
+                }
+            }
+        }
+        self.suppressed_sources.lock().await.clear();
+
         if let Some(recorder_handle) = self.recorder_handle.lock().await.take() {
             if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(30), recorder_handle).await
             {
@@ -129,6 +139,9 @@ impl MediaStream {
             }
         }
         Ok(())
+    }
+    pub async fn track_count(&self) -> usize {
+        self.tracks.lock().await.len()
     }
 
     pub async fn update_recorder_option(&self, recorder_config: RecorderOption) {

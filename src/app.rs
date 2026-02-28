@@ -51,8 +51,7 @@ pub struct AppStateInner {
     pub create_invitation_handler: Option<FnCreateInvitationHandler>,
     pub invitation: Invitation,
     pub routing_state: Arc<crate::call::RoutingState>,
-    pub pending_playbooks: Arc<Mutex<HashMap<String, String>>>,
-    pub pending_params: Arc<Mutex<HashMap<String, HashMap<String, serde_json::Value>>>>,
+    pub pending_playbooks: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
 
     pub active_calls: Arc<std::sync::Mutex<HashMap<String, ActiveCallRef>>>,
     pub total_calls: AtomicU64,
@@ -143,6 +142,27 @@ impl AppStateInner {
                 warn!("failed to start registration: {:?}", e);
             }
         }
+
+        let pending_cleanup_state = self.clone();
+        let pending_cleanup_token = token.clone();
+        crate::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let ttl = Duration::from_secs(300);
+            loop {
+                tokio::select! {
+                    _ = pending_cleanup_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        let mut pending = pending_cleanup_state.pending_playbooks.lock().await;
+                        let before = pending.len();
+                        pending.retain(|_, (_, created_at)| created_at.elapsed() < ttl);
+                        let removed = before - pending.len();
+                        if removed > 0 {
+                            info!(removed, remaining = pending.len(), "cleaned up stale pending_playbooks entries");
+                        }
+                    }
+                }
+            }
+        });
 
         tokio::select! {
             _ = token.cancelled() => {
@@ -537,8 +557,12 @@ impl AppStateInner {
     }
 
     pub async fn stop_registration(&self, wait_for_clear: Option<Duration>) -> Result<()> {
-        for (_, handle) in self.registration_handles.lock().await.iter_mut() {
-            handle.stop();
+        {
+            let mut handles = self.registration_handles.lock().await;
+            for (_, handle) in handles.iter_mut() {
+                handle.stop();
+            }
+            handles.clear();
         }
 
         if let Some(duration) = wait_for_clear {
@@ -893,7 +917,6 @@ impl AppStateBuilder {
             invitation: Invitation::new(dialog_layer),
             routing_state: Arc::new(crate::call::RoutingState::new()),
             pending_playbooks: Arc::new(Mutex::new(HashMap::new())),
-            pending_params: Arc::new(Mutex::new(HashMap::new())),
             active_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
             total_calls: AtomicU64::new(0),
             total_failed_calls: AtomicU64::new(0),

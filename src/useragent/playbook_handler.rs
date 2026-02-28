@@ -136,16 +136,11 @@ impl InvitationHandler for PlaybookInvitationHandler {
                     serde_json::Value::String(callee.clone()),
                 );
 
-                if !extras.is_empty() {
-                    let mut params = self.app_state.pending_params.lock().await;
-                    params.insert(dialog_id.clone(), extras);
-                }
-
-                // Store the playbook name in pending_playbooks
-                {
-                    let mut pending = self.app_state.pending_playbooks.lock().await;
-                    pending.insert(dialog_id.clone(), playbook);
-                }
+                let extras_opt = if extras.is_empty() {
+                    None
+                } else {
+                    Some(extras)
+                };
 
                 // Start call handler in background task
                 let app_state = self.app_state.clone();
@@ -158,34 +153,23 @@ impl InvitationHandler for PlaybookInvitationHandler {
                     use std::path::PathBuf;
 
                     // Pre-validate playbook file exists (for SIP calls)
-                    // Remove from pending to get the playbook name
-                    let playbook_name = {
-                        let pending = app_state.pending_playbooks.lock().await;
-                        pending.get(&session_id).cloned()
-                    };
+                    if !playbook.trim().starts_with("---") {
+                        // It's a file path, check if it exists
+                        let path = if playbook.starts_with("config/playbook/") {
+                            PathBuf::from(&playbook)
+                        } else {
+                            PathBuf::from("config/playbook").join(&playbook)
+                        };
 
-                    if let Some(name_or_content) = playbook_name {
-                        if !name_or_content.trim().starts_with("---") {
-                            // It's a file path, check if it exists
-                            let path = if name_or_content.starts_with("config/playbook/") {
-                                PathBuf::from(&name_or_content)
-                            } else {
-                                PathBuf::from("config/playbook").join(&name_or_content)
-                            };
-
-                            if !path.exists() {
-                                warn!(session_id, path=?path, "Playbook file not found, rejecting SIP call");
-                                // Reject the SIP dialog with 503
-                                if let Err(e) = dialog.reject(
-                                    Some(rsip::StatusCode::ServiceUnavailable),
-                                    Some("Playbook Not Found".to_string()),
-                                ) {
-                                    warn!(session_id, "Failed to reject SIP dialog: {}", e);
-                                }
-                                // Clean up pending playbook
-                                app_state.pending_playbooks.lock().await.remove(&session_id);
-                                return;
+                        if !path.exists() {
+                            warn!(session_id, path=?path, "Playbook file not found, rejecting SIP call");
+                            if let Err(e) = dialog.reject(
+                                Some(rsip::StatusCode::ServiceUnavailable),
+                                Some("Playbook Not Found".to_string()),
+                            ) {
+                                warn!(session_id, "Failed to reject SIP dialog: {}", e);
                             }
+                            return;
                         }
                     }
 
@@ -196,11 +180,7 @@ impl InvitationHandler for PlaybookInvitationHandler {
                     let (event_sender, _event_receiver) =
                         tokio::sync::mpsc::unbounded_channel::<crate::event::SessionEvent>();
 
-                    // Don't accept dialog here - let ActiveCall handle it after creating the track
-                    // This ensures proper SDP answer is generated
-
                     // Send Accept command immediately to trigger SDP negotiation
-                    // This must be done before call_handler_core consumes the receiver
                     if let Err(e) = command_sender.send(Command::Accept {
                         option: Default::default(),
                     }) {
@@ -208,54 +188,66 @@ impl InvitationHandler for PlaybookInvitationHandler {
                         return;
                     }
 
-                    // Start call handler core
-                    let handler_task = crate::spawn(crate::handler::handler::call_handler_core(
-                        ActiveCallType::Sip,
-                        session_id.clone(),
-                        app_state.clone(),
-                        cancel_token_clone.clone(),
-                        audio_receiver,
-                        None, // server_side_track
-                        true, // dump_events
-                        20,   // ping_interval
-                        command_receiver,
-                        event_sender.clone(),
-                    ));
+                    // Use a oneshot channel to receive final call extras
+                    // (including _hangup_headers) from call_handler_core
+                    let (extras_tx, extras_rx) = tokio::sync::oneshot::channel();
+                    let extras_for_call = extras_opt;
+                    let playbook_for_call = playbook;
+                    crate::spawn({
+                        let session_id = session_id.clone();
+                        let app_state = app_state.clone();
+                        let cancel_token = cancel_token_clone.clone();
+                        async move {
+                            let result = crate::handler::handler::call_handler_core(
+                                ActiveCallType::Sip,
+                                session_id,
+                                app_state,
+                                cancel_token,
+                                audio_receiver,
+                                None, // server_side_track
+                                true, // dump_events
+                                20,   // ping_interval
+                                command_receiver,
+                                event_sender,
+                                extras_for_call,
+                                Some(playbook_for_call),
+                            )
+                            .await;
+                            let _ = extras_tx.send(result);
+                        }
+                    });
 
                     // Wait for call to complete or cancellation
-                    tokio::select! {
-                        _ = handler_task => {
+                    let final_extras = tokio::select! {
+                        result = extras_rx => {
                             info!(session_id, "SIP call handler completed");
+                            result.ok().flatten()
                         }
                         _ = cancel_token_clone.cancelled() => {
                             info!(session_id, "SIP call cancelled");
-                        }
-                    }
-
-                    // Attempt to retrieve custom headers for BYE
-                    let headers = {
-                        let mut params = app_state.pending_params.lock().await;
-                        // remove returns the map of extras for this session
-                        if let Some(extras) = params.remove(&session_id) {
-                            if let Some(h_val) = extras.get("_hangup_headers") {
-                                if let Ok(h_map) = serde_json::from_value::<
-                                    std::collections::HashMap<String, String>,
-                                >(h_val.clone())
-                                {
-                                    Some(h_map)
-                                } else if let serde_json::Value::String(s) = h_val {
-                                    // Handle case where set_var stores it as a string
-                                    serde_json::from_str::<std::collections::HashMap<String, String>>(s).ok()
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
                             None
                         }
                     };
+
+                    // Extract hangup headers from final call extras
+                    let headers = final_extras.and_then(|extras| {
+                        extras.get("_hangup_headers").and_then(|h_val| {
+                            serde_json::from_value::<std::collections::HashMap<String, String>>(
+                                h_val.clone(),
+                            )
+                            .ok()
+                            .or_else(|| {
+                                if let serde_json::Value::String(s) = h_val {
+                                    serde_json::from_str::<
+                                        std::collections::HashMap<String, String>,
+                                    >(s.as_str())
+                                    .ok()
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    });
 
                     let sip_headers = headers.map(|h_map| {
                         h_map

@@ -19,6 +19,7 @@ use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use rustrtc::IceServer;
 use serde_json::json;
+use std::collections::HashMap;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
@@ -86,6 +87,11 @@ pub async fn webrtc_handler(
 }
 
 /// Core call handling logic that works with either WebSocket or mpsc channels
+///
+/// `extras` and `playbook_name` are session-scoped parameters passed directly
+/// by the caller (SIP handler, CLI, etc.) instead of through global maps.
+/// Returns the final call extras (including `_hangup_headers` if set) so the
+/// caller can use them for SIP BYE or other post-call processing.
 pub async fn call_handler_core(
     call_type: ActiveCallType,
     session_id: String,
@@ -97,15 +103,11 @@ pub async fn call_handler_core(
     ping_interval: u64,
     mut command_receiver: tokio::sync::mpsc::UnboundedReceiver<Command>,
     event_sender_to_client: tokio::sync::mpsc::UnboundedSender<crate::event::SessionEvent>,
-) {
+    extras: Option<HashMap<String, serde_json::Value>>,
+    playbook_name: Option<String>,
+) -> Option<HashMap<String, serde_json::Value>> {
     let _cancel_guard = cancel_token.clone().drop_guard();
     let track_config = TrackConfig::default();
-
-    // Check for pending params (extracted headers)
-    let extras = {
-        let mut pending = app_state.pending_params.lock().await;
-        pending.remove(&session_id)
-    };
 
     let active_call = Arc::new(ActiveCall::new(
         call_type.clone(),
@@ -121,10 +123,17 @@ pub async fn call_handler_core(
         None,
     ));
 
-    // Check for pending playbook
+    // Load playbook: prefer direct parameter, fall back to pending_playbooks
+    // (pending_playbooks is used by the run_playbook HTTP endpoint)
     {
-        let mut pending = app_state.pending_playbooks.lock().await;
-        if let Some(name_or_content) = pending.remove(&session_id) {
+        let name_or_content = playbook_name.or_else(|| {
+            app_state
+                .pending_playbooks
+                .try_lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&session_id).map(|(val, _)| val))
+        });
+        if let Some(name_or_content) = name_or_content {
             let playbook_result = if name_or_content.trim().starts_with("---") {
                 Playbook::parse(&name_or_content)
             } else {
@@ -207,7 +216,7 @@ pub async fn call_handler_core(
                         code: None,
                     };
                     event_sender_to_client.send(event).ok();
-                    return;
+                    return None;
                 }
             }
         }
@@ -289,17 +298,13 @@ pub async fn call_handler_core(
         Err(e) => warn!(session_id, "call ended with error: {}", e),
     }
 
-    // Write back final extras to pending_params for post-call processing (e.g. BYE headers)
-    if call_type == ActiveCallType::Sip {
-        let state = active_call.call_state.read().await;
-        if let Some(extras) = &state.extras {
-            let mut pending = app_state.pending_params.lock().await;
-            pending.insert(session_id.clone(), extras.clone());
-        }
-    }
+    // Capture final extras (including _hangup_headers) before cleanup
+    let final_extras = active_call.call_state.read().await.extras.clone();
 
     active_call.cleanup().await.ok();
     debug!(session_id, "Call handler core completed");
+
+    final_extras
 }
 
 pub async fn call_handler(
@@ -327,18 +332,23 @@ pub async fn call_handler(
         let session_id_clone = session_id.clone();
         let app_state_clone = app_state.clone();
         let cancel_token_clone = cancel_token.clone();
-        crate::spawn(call_handler_core(
-            call_type,
-            session_id_clone,
-            app_state_clone,
-            cancel_token_clone,
-            audio_receiver,
-            server_side_track,
-            dump_events,
-            ping_interval.into(),
-            command_receiver,
-            event_sender_to_client,
-        ));
+        crate::spawn(async move {
+            call_handler_core(
+                call_type,
+                session_id_clone,
+                app_state_clone,
+                cancel_token_clone,
+                audio_receiver,
+                server_side_track,
+                dump_events,
+                ping_interval.into(),
+                command_receiver,
+                event_sender_to_client,
+                None, // extras — not used for WebSocket calls
+                None, // playbook_name — falls back to pending_playbooks
+            )
+            .await;
+        });
 
         // Handle WebSocket I/O
         let recv_from_ws_loop = async {
@@ -497,5 +507,68 @@ mod tests {
         // ensure values are preserved
         assert_eq!(extras.get("X-Tenant-ID").unwrap(), &json!("123"));
         assert_eq!(extras.get("Custom-Header").unwrap(), &json!("abc"));
+    }
+
+    #[tokio::test]
+    async fn test_call_handler_core_extras_are_session_scoped() {
+        use crate::app::AppStateBuilder;
+        use crate::call::{ActiveCallType, Command};
+        use crate::config::Config;
+
+        let mut config = Config::default();
+        config.udp_port = 0;
+        let app_state = AppStateBuilder::new()
+            .with_config(config)
+            .build()
+            .await
+            .expect("Failed to build app state");
+
+        let session_id = "test-session-scoped".to_string();
+        let cancel_token = CancellationToken::new();
+
+        // Pass extras directly as a parameter (not via global map)
+        let mut extras = HashMap::new();
+        extras.insert("X-Custom".to_string(), json!("value"));
+
+        let (_audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let (event_sender, _event_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<crate::event::SessionEvent>();
+
+        // Send a Hangup command immediately to end the call
+        command_sender
+            .send(Command::Hangup {
+                reason: None,
+                initiator: None,
+                headers: None,
+            })
+            .ok();
+        drop(command_sender);
+
+        // Run call_handler_core with extras passed directly
+        let final_extras = call_handler_core(
+            ActiveCallType::Sip,
+            session_id.clone(),
+            app_state.clone(),
+            cancel_token,
+            audio_receiver,
+            None,
+            false,
+            0,
+            command_receiver,
+            event_sender,
+            Some(extras), // extras passed directly
+            None,         // no playbook
+        )
+        .await;
+
+        // Verify that final extras are returned and contain our custom header
+        assert!(final_extras.is_some(), "final extras should be returned");
+        let extras = final_extras.unwrap();
+        assert_eq!(
+            extras.get("X-Custom"),
+            Some(&json!("value")),
+            "session-scoped extras should be preserved"
+        );
     }
 }

@@ -472,3 +472,157 @@ async fn test_remove_processor_from_nonexistent_track() -> Result<()> {
 
     Ok(())
 }
+
+pub struct StoppableTestTrack {
+    id: TrackId,
+    config: TrackConfig,
+    processor_chain: ProcessorChain,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StoppableTestTrack {
+    pub fn new(id: TrackId, stopped: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            id,
+            config: TrackConfig::default(),
+            processor_chain: ProcessorChain::new(16000),
+            stopped,
+        }
+    }
+}
+
+#[async_trait]
+impl Track for StoppableTestTrack {
+    fn ssrc(&self) -> u32 {
+        0
+    }
+    fn id(&self) -> &TrackId {
+        &self.id
+    }
+    fn config(&self) -> &TrackConfig {
+        &self.config
+    }
+    fn processor_chain(&mut self) -> &mut ProcessorChain {
+        &mut self.processor_chain
+    }
+    async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
+        Ok("".to_string())
+    }
+    async fn update_remote_description(&mut self, _answer: &String) -> Result<()> {
+        Ok(())
+    }
+    async fn start(
+        &mut self,
+        _event_sender: EventSender,
+        _packet_sender: TrackPacketSender,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&self) -> Result<()> {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    async fn send_packet(&mut self, _packet: &AudioFrame) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_cleanup_drains_all_tracks() -> Result<()> {
+    let event_sender = crate::event::create_event_sender();
+    let stream = MediaStreamBuilder::new(event_sender)
+        .with_id("test-cleanup".to_string())
+        .build();
+
+    let stopped1 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped2 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped3 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    stream
+        .update_track(
+            Box::new(StoppableTestTrack::new(
+                "track1".to_string(),
+                stopped1.clone(),
+            )),
+            None,
+        )
+        .await;
+    stream
+        .update_track(
+            Box::new(StoppableTestTrack::new(
+                "track2".to_string(),
+                stopped2.clone(),
+            )),
+            None,
+        )
+        .await;
+    stream
+        .update_track(
+            Box::new(StoppableTestTrack::new(
+                "track3".to_string(),
+                stopped3.clone(),
+            )),
+            None,
+        )
+        .await;
+
+    // Verify tracks are present
+    assert_eq!(stream.track_count().await, 3);
+
+    // Cleanup should drain all tracks and call stop() on each
+    stream.cleanup().await.unwrap();
+
+    // All tracks should be stopped
+    assert!(
+        stopped1.load(std::sync::atomic::Ordering::SeqCst),
+        "track1 should have been stopped"
+    );
+    assert!(
+        stopped2.load(std::sync::atomic::Ordering::SeqCst),
+        "track2 should have been stopped"
+    );
+    assert!(
+        stopped3.load(std::sync::atomic::Ordering::SeqCst),
+        "track3 should have been stopped"
+    );
+
+    // Tracks HashMap should be empty
+    assert_eq!(
+        stream.track_count().await,
+        0,
+        "all tracks should be drained after cleanup"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cleanup_is_idempotent() -> Result<()> {
+    let event_sender = crate::event::create_event_sender();
+    let stream = MediaStreamBuilder::new(event_sender)
+        .with_id("test-idempotent".to_string())
+        .build();
+
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    stream
+        .update_track(
+            Box::new(StoppableTestTrack::new(
+                "track1".to_string(),
+                stopped.clone(),
+            )),
+            None,
+        )
+        .await;
+
+    // First cleanup
+    stream.cleanup().await.unwrap();
+    assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(stream.track_count().await, 0);
+
+    // Second cleanup should be safe (no panic, no tracks to drain)
+    stream.cleanup().await.unwrap();
+    assert_eq!(stream.track_count().await, 0);
+
+    Ok(())
+}
