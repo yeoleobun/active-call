@@ -153,13 +153,10 @@ pub async fn run_playbook(
 
     let session_id = format!("s.{}", Uuid::new_v4().to_string());
 
-    // Store pending playbook with creation timestamp for TTL-based cleanup
     state.pending_playbooks.lock().await.insert(
         session_id.clone(),
         (playbook_val, std::time::Instant::now()),
     );
-
-    // TODO: Handle SIP outbound if needed
 
     Json(RunPlaybookResponse { session_id }).into_response()
 }
