@@ -418,7 +418,7 @@ impl TtsTask {
                         if self.handle_event(cmd_seq, res).await {
                              last_chunk_recv_time = Instant::now();
                         }
-                    }else{
+                    } else {
                         debug!(
                             session_id = %self.session_id,
                             track_id = %self.track_id,
@@ -426,6 +426,14 @@ impl TtsTask {
                             "tts event stream finished"
                         );
                         tts_finished = true;
+                        // In streaming mode, if commands are also finished, exit select
+                        // to avoid livelock where only ptimer.tick() fires indefinitely.
+                        // In non-streaming mode, we must NOT break here because stop()
+                        // sends an extra Finished event after all audio has been emitted,
+                        // and we need ptimer.tick() to drain the emit_q.
+                        if cmd_finished && self.streaming {
+                            break;
+                        }
                     }
                 }
             }
