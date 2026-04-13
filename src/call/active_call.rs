@@ -964,7 +964,22 @@ impl ActiveCall {
                 );
                 self.invitation.hangup(id, code, reason).await
             }
-            None => Ok(()),
+            None => {
+                let ready = self.call_state.write().await.ready_to_answer.take();
+                if let Some((_, _, dialog)) = ready {
+                    info!(
+                        session_id = self.session_id,
+                        ?reason,
+                        ?code,
+                        "rejecting call from ready_to_answer"
+                    );
+                    let dialog_id = dialog.id();
+                    dialog.reject(code, reason).ok();
+                    self.invitation.dialog_layer.remove_dialog(&dialog_id);
+                    self.cancel_token.cancel();
+                }
+                Ok(())
+            }
         }
     }
 
