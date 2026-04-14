@@ -1506,6 +1506,14 @@ impl ActiveCall {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
+        if matches!(self.call_type, ActiveCallType::Sip | ActiveCallType::B2bua) {
+            self.do_reject(
+                Some(rsipstack::rsip::StatusCode::Decline),
+                Some("handler disconnected".to_string()),
+            )
+            .await
+            .ok();
+        }
         self.call_state.write().await.tts_handle = None;
         self.media_stream.cleanup().await.ok();
         Ok(())
